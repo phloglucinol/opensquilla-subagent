@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Node test suite for schemas, permission gates, subprocess arguments, usage
+  accounting, chain context limits, failure cleanup, and output persistence.
+- A 120KB task limit with a clear error for OpenSquilla's single-argument
+  `--message` transport.
+- Live elapsed-time and sanitized fs-worker activity updates while a subagent
+  is running, with recent activity retained in result details.
+- `effort` presets (`fast`, `balanced`, `deep`) and optional thinking-level
+  overrides for single calls and chain steps.
+
+### Changed
+
+- `permissions` is now genuinely optional in both tool schemas, matching the
+  documented `restricted` default; tool and chain objects reject unknown keys.
+- Chain `{previous}` insertion defaults to 12KB/500 lines (configurable up to
+  32KB), final output reuses the last step's persisted file, and failed steps
+  throw proper Pi tool errors.
+- OpenSquilla usage is converted to Pi's nested LLM usage format and aggregated
+  across chain steps.
+- Write-capable permission descriptions now reflect UI confirmation plus
+  mandatory `--workspace-lockdown` containment.
+- Corrected the documented router mapping to `c2=kimi-k2.7-code` and
+  `c3=glm-5.2`, and synchronized skill defaults to `timeout=300` and
+  `maxIterations=8`.
+- Moved `typebox` from a bundled runtime dependency to a Pi peer dependency.
+- Tool guidance now favors 2-4 bounded phases, sequential independent reviews,
+  and fast scouting/synthesis instead of one broad c3 audit.
+- Both tools declare sequential execution to respect OpenSquilla's profile-wide
+  writer lock; lock conflicts now return a concise actionable error.
+
+### Fixed
+
+- Failed and malformed OpenSquilla turns now remove their scratch directories.
+- Persisted output files are created with owner-only permissions.
+
 ## [0.2.1] - 2026-07-23
 
 ### Changed

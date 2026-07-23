@@ -2,7 +2,7 @@
 
 Pi extension that delegates a task to an isolated [OpenSquilla](https://github.com/opensquilla/opensquilla) agent with its own **SquillaRouter** model routing.
 
-Each call runs `opensquilla agent --json` as a subprocess. OpenSquilla handles provider auth, tool dispatch, context management, and per-turn model tier routing (c0–c3) internally. Pi only sees the final text plus routing metadata.
+Each call runs `opensquilla agent --json` as a subprocess. OpenSquilla handles provider auth, tool dispatch, context management, and per-turn model tier routing (c0–c3) internally. Pi receives sanitized live activity plus the final text, usage, and routing metadata.
 
 ```
 Pi → opensquilla_subagent tool → opensquilla agent --json
@@ -14,7 +14,7 @@ Pi → opensquilla_subagent tool → opensquilla agent --json
 - **Independent context window** — the subagent does not consume the parent's context budget; good for long investigations or reviews.
 - **Automatic model selection** — OpenSquilla's SquillaRouter V4.2 Phase 3 classifier picks the cheapest model that can handle the task (flash for trivial, pro/glm/kimi-code for complex).
 - **Routing transparency** — every result includes `routed_tier`, `routed_model`, and `routing_source`, so you can see what happened.
-- **Safe defaults** — read-only by default (`permissions: "restricted"`); write modes are gated behind TUI confirmation and workspace containment.
+- **Safe defaults** — agent actions are read-only by default (`permissions: "restricted"`); broader write-capable modes require Pi UI confirmation and are still contained by OpenSquilla's `--workspace-lockdown`.
 
 ## Prerequisites
 
@@ -34,7 +34,7 @@ Pi → opensquilla_subagent tool → opensquilla agent --json
    printf 'TOKENRHYTHM_API_KEY=%s\n' 'your-key' >> ~/.opensquilla/.env
    ```
 
-   Then point `[llm]` and `[squilla_router.tiers]` in `~/.opensquilla/config.toml` at that provider. Verify with `opensquilla models probe`.
+   Then point `[llm]` and `[squilla_router.tiers]` in `~/.opensquilla/config.toml` at that provider. Verify with `opensquilla models probe`. `opensquilla doctor` may still report a stopped gateway; single-shot `opensquilla agent` runs do not require the gateway service.
 
 ## Install
 
@@ -62,10 +62,11 @@ In a Pi session, the `opensquilla_subagent` tool is available to the model:
 
 ```typescript
 opensquilla_subagent({
-  task: "Review the current git diff for correctness regressions and missing tests. Return findings with file:line references.",
+  task: "Review one module for correctness regressions. Return at most five findings with file:line references.",
   permissions: "restricted",   // "restricted" (default, read-only) | "bypass" | "full"
-  timeout: 300,                // seconds (max 600)
-  maxIterations: 8             // max 15
+  effort: "fast",              // "fast" | "balanced" (default) | "deep"
+  timeout: 120,                // optional explicit override (max 600)
+  maxIterations: 4             // optional explicit override (max 15)
 })
 ```
 
@@ -78,34 +79,53 @@ You can also ask in plain language:
 | Parameter | Default | Description |
 |---|---|---|
 | `task` | (required) | Complete, self-contained task description |
-| `permissions` | `"restricted"` | `restricted` (read-only), `bypass` (workspace-contained writes), `full` (unrestricted). `bypass`/`full` prompt in TUI; non-interactive modes refuse. |
-| `timeout` | `300` | Total subagent wall-clock seconds (max 600) |
-| `maxIterations` | `8` | Max model/tool loop iterations (max 15) |
+| `permissions` | `"restricted"` | `restricted` makes agent tool actions read-only. `bypass`/`full` enable broader OpenSquilla capabilities, require confirmation in Pi TUI/RPC modes, and remain write-contained to the workspace/scratch directory by `--workspace-lockdown`. Print/JSON modes refuse them. |
+| `effort` | `"balanced"` | `fast`: 120s, 4 iterations, thinking off, 1 provider retry. `balanced`: 300s, 8 iterations. `deep`: 600s, 12 iterations. |
+| `thinking` | preset/router default | Optional OpenSquilla thinking override: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `adaptive`. |
+| `timeout` | effort preset | Total subagent wall-clock seconds (max 600) |
+| `maxIterations` | effort preset | Max model/tool loop iterations (max 15) |
 
-### Result
+### Progress And Result
 
-- `content` — subagent's final text, truncated to 50KB / 2000 lines. Full output saved to `details.outputPath`.
+While the subprocess is running, Pi receives periodic updates containing elapsed time and up to four recent activities such as `read src/auth.ts`, `list tests`, or `search token in src`. This is best-effort metadata from OpenSquilla's fs-worker cache; model reasoning and partial answer text remain private until the turn completes.
+
+- `content` — subagent's final text, truncated to Pi's 50KB / 2000-line tool limits. Full output is saved to `details.outputPath` with owner-only permissions.
 - `details.routing` — `{ routed_tier, routed_model, routing_source }` (e.g. `c0` / `deepseek-v4-flash` / `v4_phase3`).
-- `details.usage` — token accounting from the OpenSquilla turn.
+- `details.usage` — raw token accounting from the OpenSquilla turn.
+- `details.activities` — recent sanitized file/search activity captured during the run.
+- top-level `usage` — the same usage converted to Pi's accounting format, so nested model cost appears in session totals.
 
 ### Chain mode
 
-For multi-phase work where each phase deserves its own model tier, run a chain. Each step is an independent OpenSquilla turn with its own routing; `{previous}` inlines the prior step's output.
+Use a chain only when later phases depend on earlier output. Each step is an independent OpenSquilla turn with its own routing; `{previous}` inlines a bounded prior-step handoff.
 
 ```typescript
 opensquilla_chain({
   steps: [
-    { task: "List the main types and entry points of the auth module." },
-    { task: "Based on {previous}, review for the highest-risk regression." },
-    { task: "Based on {previous}, propose the smallest safe fix. Do not edit files." }
+    { task: "List the auth entry points and return a concise structured map.", effort: "fast" },
+    { task: "Using {previous}, inspect only the highest-risk path and return at most three findings." },
+    { task: "Using {previous}, synthesize the smallest safe recommendation.", effort: "fast" }
   ],
   permissions: "restricted",   // chain-level default; per-step override allowed
-  timeout: 300,                // chain-level default (max 600)
-  maxIterations: 8             // chain-level default (max 15)
+  effort: "balanced",
+  previousMaxBytes: 12288       // default handoff cap; per-step override allowed, max 32768
 })
 ```
 
-Returns the final step's text plus `details.steps[]` with each step's routing. A failed step stops the chain with `details.failedAt`.
+Returns the final step's text plus `details.steps[]` with each step's routing, effort, activity, and raw usage. The chain reports aggregate usage to Pi. `{previous}` is capped at 12KB/500 lines by default before insertion into the next prompt; it can be raised to 32KB when needed. A failed step throws a tool error that includes completed-step routing and output paths.
+
+## Task Sizing
+
+Broad prompts tend to route to c3 and can spend the full timeout. Prefer these shapes:
+
+- Independent audit dimensions: issue 2-4 separate `opensquilla_subagent` calls sequentially, for example correctness, security, and tests. Each result returns to the parent before the next call.
+- Dependent work: use a 2-4 step chain such as `scout (fast) -> focused review (balanced) -> concise synthesis (fast)`.
+- Scope every task to one module, workflow, risk class, or explicit file set. Put an output count/size limit in the task.
+- Avoid a single prompt like "read the whole repository and perform a complete deep review" unless the user explicitly wants a slow c3 audit.
+
+Very small chain steps are also inefficient because each step repeats OpenSquilla startup and routing. Two to four meaningful phases is the intended range.
+
+OpenSquilla 0.5.0rc4 holds a profile-wide writer lock for the duration of a run. The extension marks both tools as sequential so sibling tool calls in one Pi response do not collide. Separate Pi processes or projects using the same OpenSquilla profile can still conflict; wait for the active run or configure another profile.
 
 ## Configuration
 
@@ -115,8 +135,8 @@ OpenSquilla's router tier mapping lives in `~/.opensquilla/config.toml` under `[
 |---|---|---|
 | c0 | deepseek-v4-flash | trivial chat, extraction, short rewrites |
 | c1 | deepseek-v4-pro | default coding, debugging, moderate analysis |
-| c2 | glm-5.2 | multi-step coding, structured reasoning |
-| c3 | kimi-k2.7-code | architecture, deep review, high-stakes synthesis |
+| c2 | kimi-k2.7-code | multi-step coding, structured reasoning |
+| c3 | glm-5.2 | architecture, deep review, high-stakes synthesis |
 | image | kimi-k2.6 | vision/image input |
 
 To use a different provider (OpenRouter, OpenAI, Anthropic, …), set `[llm]` and each tier's `provider`/`model` accordingly. See `opensquilla config get squilla_router`.
@@ -124,13 +144,21 @@ To use a different provider (OpenRouter, OpenAI, Anthropic, …), set `[llm]` an
 ## How It Works
 
 1. Pi calls `opensquilla_subagent({ task, ... })`.
-2. The extension spawns `opensquilla agent --json --workspace <cwd> --workspace-strict --scratch-dir <tmp> --permissions <p> --stateless-keep-project-rules --no-memory-capture ...`.
-3. OpenSquilla runs its pre-turn pipeline, which includes the `apply_squilla_router` step: the V4.2 Phase 3 classifier (LightGBM + ONNX MLP + BGE embeddings) scores the prompt and picks a tier.
+2. The extension starts a sanitized activity monitor, then spawns `opensquilla agent --json --workspace <cwd> --workspace-strict --scratch-dir <tmp> --permissions <p> --stateless-keep-project-rules --no-memory-capture ...`.
+3. The monitor reports elapsed time and newly observed fs-worker operations while OpenSquilla runs its pre-turn pipeline. The `apply_squilla_router` step scores the prompt and picks a tier.
 4. The tier's model answers the task using OpenSquilla's own tool surface.
 5. OpenSquilla emits a JSON payload (`{ status, text, usage, routing, errors }`).
 6. The extension parses it, truncates, persists full output to a temp file, and returns it to Pi.
 
-Routing happens inside OpenSquilla — Pi does not see intermediate tool calls, session state, or the model's streaming output. Only the final text and routing metadata cross the process boundary.
+Routing happens inside OpenSquilla. Pi sees best-effort sanitized activity updates, but not model reasoning, partial answer text, exact tool payloads, or session state. The final text, usage, and routing metadata arrive when the subprocess completes.
+
+## Limits
+
+OpenSquilla 0.5.0rc4 accepts the task only through `--message`, so the extension passes it as one process argument. Tasks are capped at 120KB to stay below common per-argument OS limits. On multi-user systems, process arguments may be visible to other local users; do not put secrets in delegated task text. A future OpenSquilla stdin or message-file option would remove this limitation.
+
+OpenSquilla's sandbox currently maintains `.opensquilla-cache/` worker payloads inside the workspace even in `restricted` mode. This is runtime state rather than an agent-authored project edit, but it should be ignored by version control. The package's own `.gitignore` includes it; add the same rule in consuming repositories when needed.
+
+Live activity is best effort. If another OpenSquilla process writes to the same workspace cache concurrently, activity records cannot be perfectly attributed; the profile lock normally prevents this for one profile.
 
 ## License
 
