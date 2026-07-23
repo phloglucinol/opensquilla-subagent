@@ -64,8 +64,8 @@ In a Pi session, the `opensquilla_subagent` tool is available to the model:
 opensquilla_subagent({
   task: "Review the current git diff for correctness regressions and missing tests. Return findings with file:line references.",
   permissions: "restricted",   // "restricted" (default, read-only) | "bypass" | "full"
-  timeout: 600,                // seconds
-  maxIterations: 20
+  timeout: 300,                // seconds (max 600)
+  maxIterations: 8             // max 15
 })
 ```
 
@@ -79,8 +79,8 @@ You can also ask in plain language:
 |---|---|---|
 | `task` | (required) | Complete, self-contained task description |
 | `permissions` | `"restricted"` | `restricted` (read-only), `bypass` (workspace-contained writes), `full` (unrestricted). `bypass`/`full` prompt in TUI; non-interactive modes refuse. |
-| `timeout` | `600` | Total subagent wall-clock seconds |
-| `maxIterations` | `20` | Max model/tool loop iterations |
+| `timeout` | `300` | Total subagent wall-clock seconds (max 600) |
+| `maxIterations` | `8` | Max model/tool loop iterations (max 15) |
 
 ### Result
 
@@ -100,8 +100,8 @@ opensquilla_chain({
     { task: "Based on {previous}, propose the smallest safe fix. Do not edit files." }
   ],
   permissions: "restricted",   // chain-level default; per-step override allowed
-  timeout: 600,                // chain-level default
-  maxIterations: 20            // chain-level default
+  timeout: 300,                // chain-level default (max 600)
+  maxIterations: 8             // chain-level default (max 15)
 })
 ```
 

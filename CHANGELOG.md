@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-07-23
+
+### Changed
+
+- Tightened defaults to reduce latency and token cost: `timeout` 600→300
+  (max 600), `maxIterations` 20→8 (max 15). Schema `maximum` clamps model
+  requests; runtime `Math.min` clamps any out-of-range value.
+- Updated SKILL.md and README defaults tables.
+
 ## [0.2.0] - 2026-07-23
 
 ### Added

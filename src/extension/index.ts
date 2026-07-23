@@ -206,23 +206,23 @@ export default function (pi: ExtensionAPI) {
 			timeout: Type.Optional(
 				Type.Integer({
 					minimum: 10,
-					maximum: 3600,
-					description: "Total subagent wall-clock timeout in seconds (default 600)",
+					maximum: 600,
+					description: "Total subagent wall-clock timeout in seconds (default 300). Simple tasks need 60-120; reserve 300+ for deep audits.",
 				}),
 			),
 			maxIterations: Type.Optional(
 				Type.Integer({
 					minimum: 1,
-					maximum: 100,
-					description: "Max model/tool loop iterations (default 20)",
+					maximum: 15,
+					description: "Max model/tool loop iterations (default 8). Trivial Q&A needs 1-3; deep audits need 10-15.",
 				}),
 			),
 		}),
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const perms = params.permissions ?? "restricted";
-			const timeout = params.timeout ?? 600;
-			const maxIter = params.maxIterations ?? 20;
+			const timeout = Math.min(params.timeout ?? 300, 600);
+			const maxIter = Math.min(params.maxIterations ?? 8, 15);
 			await confirmWrite(ctx, perms, ctx.cwd);
 
 			const onProgress: ProgressCb = (t) =>
@@ -268,10 +268,10 @@ export default function (pi: ExtensionAPI) {
 			}),
 		),
 		timeout: Type.Optional(
-			Type.Integer({ minimum: 10, maximum: 3600, description: "Per-step timeout override" }),
+			Type.Integer({ minimum: 10, maximum: 600, description: "Per-step timeout override (default 300)" }),
 		),
 		maxIterations: Type.Optional(
-			Type.Integer({ minimum: 1, maximum: 100, description: "Per-step iteration override" }),
+			Type.Integer({ minimum: 1, maximum: 15, description: "Per-step iteration override (default 8)" }),
 		),
 	});
 
@@ -302,23 +302,23 @@ export default function (pi: ExtensionAPI) {
 			timeout: Type.Optional(
 				Type.Integer({
 					minimum: 10,
-					maximum: 3600,
-					description: "Default per-step timeout in seconds (default 600)",
+					maximum: 600,
+					description: "Default per-step timeout in seconds (default 300)",
 				}),
 			),
 			maxIterations: Type.Optional(
 				Type.Integer({
 					minimum: 1,
-					maximum: 100,
-					description: "Default per-step max iterations (default 20)",
+					maximum: 15,
+					description: "Default per-step max iterations (default 8)",
 				}),
 			),
 		}),
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const defaultPerms = params.permissions ?? "restricted";
-			const defaultTimeout = params.timeout ?? 600;
-			const defaultMaxIter = params.maxIterations ?? 20;
+			const defaultTimeout = Math.min(params.timeout ?? 300, 600);
+			const defaultMaxIter = Math.min(params.maxIterations ?? 8, 15);
 
 			if (params.steps.length === 0) throw new Error("chain requires at least one step");
 			if (params.steps.length > 10) {
@@ -360,8 +360,8 @@ export default function (pi: ExtensionAPI) {
 				const step = params.steps[i];
 				const perms = step.permissions ?? defaultPerms;
 				const task = step.task.replace(/\{previous\}/g, previous);
-				const timeout = step.timeout ?? defaultTimeout;
-				const maxIter = step.maxIterations ?? defaultMaxIter;
+				const timeout = Math.min(step.timeout ?? defaultTimeout, 600);
+				const maxIter = Math.min(step.maxIterations ?? defaultMaxIter, 15);
 
 				onProgress(`chain step ${i + 1}/${params.steps.length} (permissions=${perms})...`);
 
