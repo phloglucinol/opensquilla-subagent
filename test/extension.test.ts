@@ -314,15 +314,26 @@ test("progress updates expose recent OpenSquilla file activity", async () => {
 	const workerDir = join(workspace, ".opensquilla-cache", "fs-worker");
 	await mkdir(workspace, { recursive: true });
 	const updates: string[] = [];
+	const sensitiveValues = ["sk-live-SUPER_SECRET", "*.private.json"];
 	const { subagent } = createHarness(async () => {
 		await new Promise((resolve) => setTimeout(resolve, 100));
 		await mkdir(workerDir, { recursive: true });
 		await writeFile(
-			join(workerDir, "activity.json"),
+			join(workerDir, "activity-read.json"),
 			JSON.stringify({
 				kind: "read_file",
 				displayPath: join(workspace, "src", "live.ts"),
 				path: join(workspace, "src", "live.ts"),
+			}),
+			"utf8",
+		);
+		await writeFile(
+			join(workerDir, "activity-search.json"),
+			JSON.stringify({
+				kind: "glob_search",
+				pattern: sensitiveValues[0],
+				include: sensitiveValues[1],
+				root: join(workspace, "src"),
 			}),
 			"utf8",
 		);
@@ -339,7 +350,47 @@ test("progress updates expose recent OpenSquilla file activity", async () => {
 	);
 	assert.ok(updates.some((text) => text.includes("OpenSquilla subagent (fast) running")));
 	assert.ok(updates.some((text) => text.includes("read src/live.ts")));
-	assert.deepEqual(result.details.activities, ["read src/live.ts"]);
+	assert.ok(updates.some((text) => text.includes("search in src")));
+	assert.deepEqual(result.details.activities, ["read src/live.ts", "search in src"]);
+	for (const sensitiveValue of sensitiveValues) {
+		assert.ok(updates.every((text) => !text.includes(sensitiveValue)));
+		assert.ok(result.details.activities.every((activity: string) => !activity.includes(sensitiveValue)));
+	}
+});
+
+test("progress updates sanitize include-only glob search activity", async () => {
+	const workspace = join(testTmpDir, "workspace");
+	const workerDir = join(workspace, ".opensquilla-cache", "fs-worker");
+	const sensitiveInclude = "*.private.json";
+	await mkdir(workspace, { recursive: true });
+	const updates: string[] = [];
+	const { subagent } = createHarness(async () => {
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		await mkdir(workerDir, { recursive: true });
+		await writeFile(
+			join(workerDir, "activity-search.json"),
+			JSON.stringify({
+				kind: "glob_search",
+				include: sensitiveInclude,
+				root: join(workspace, "src"),
+			}),
+			"utf8",
+		);
+		await new Promise((resolve) => setTimeout(resolve, 800));
+		return { code: 0, killed: false, stdout: payload(), stderr: "" };
+	});
+
+	const result = await subagent.execute(
+		"call-progress-include-only",
+		{ task: "Inspect private JSON files", effort: "fast" },
+		undefined,
+		(partial: any) => updates.push(partial.content[0]?.text ?? ""),
+		context({ cwd: workspace }),
+	);
+	assert.ok(updates.some((text) => text.includes("search in src")));
+	assert.deepEqual(result.details.activities, ["search in src"]);
+	assert.ok(updates.every((text) => !text.includes(sensitiveInclude)));
+	assert.ok(result.details.activities.every((activity: string) => !activity.includes(sensitiveInclude)));
 });
 
 test("profile lock conflicts return a concise actionable error", async () => {

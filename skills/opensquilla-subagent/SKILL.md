@@ -67,8 +67,9 @@ opensquilla_subagent({
 
 While running, the tool emits elapsed-time heartbeats and up to four recent
 sanitized activities such as `read src/auth.ts`, `list tests`, or
-`search token in src`. These come from OpenSquilla's fs-worker cache. Pi does
-not receive model reasoning or partial answer text.
+`search in src`. Search patterns and queries are not exposed to Pi. These come
+from OpenSquilla's fs-worker cache. Pi does not receive model reasoning or
+partial answer text.
 
 ## Output and Routing Metadata
 

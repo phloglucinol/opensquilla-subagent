@@ -250,15 +250,8 @@ function formatWorkerActivity(cwd: string, payload: WorkerActivityPayload): stri
 			return `read ${target}`;
 		case "list_dir":
 			return `list ${target}`;
-		case "glob_search": {
-			const pattern =
-				typeof payload.pattern === "string"
-					? payload.pattern
-					: typeof payload.include === "string"
-						? payload.include
-						: "*";
-			return `search ${pattern} in ${target}`;
-		}
+		case "glob_search":
+			return `search in ${target}`;
 		case "write_file":
 		case "write":
 			return `write ${target}`;

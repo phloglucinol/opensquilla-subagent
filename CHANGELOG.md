@@ -40,6 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Glob search activity no longer exposes fs-worker `pattern` or `include`
+  values in Pi progress updates or result details.
 - Failed and malformed OpenSquilla turns now remove their scratch directories.
 - Persisted output files are created with owner-only permissions.
 

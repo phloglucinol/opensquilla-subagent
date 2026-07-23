@@ -87,7 +87,7 @@ You can also ask in plain language:
 
 ### Progress And Result
 
-While the subprocess is running, Pi receives periodic updates containing elapsed time and up to four recent activities such as `read src/auth.ts`, `list tests`, or `search token in src`. This is best-effort metadata from OpenSquilla's fs-worker cache; model reasoning and partial answer text remain private until the turn completes.
+While the subprocess is running, Pi receives periodic updates containing elapsed time and up to four recent activities such as `read src/auth.ts`, `list tests`, or `search in src`. Search patterns and queries are not exposed to Pi. This is best-effort metadata from OpenSquilla's fs-worker cache; model reasoning and partial answer text remain private until the turn completes.
 
 - `content` — subagent's final text, truncated to Pi's 50KB / 2000-line tool limits. Full output is saved to `details.outputPath` with owner-only permissions.
 - `details.routing` — `{ routed_tier, routed_model, routing_source }` (e.g. `c0` / `deepseek-v4-flash` / `v4_phase3`).
