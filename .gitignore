@@ -5,3 +5,4 @@ tmp/
 .pi/
 .fallow/
 dist/
+.opensquilla-cache/
