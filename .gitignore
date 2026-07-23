@@ -6,3 +6,4 @@ tmp/
 .fallow/
 dist/
 .opensquilla-cache/
+AGENTS.md
