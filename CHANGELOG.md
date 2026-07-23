@@ -33,8 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `c3=glm-5.2`, and synchronized skill defaults to `timeout=300` and
   `maxIterations=8`.
 - Moved `typebox` from a bundled runtime dependency to a Pi peer dependency.
-- Tool guidance now favors 2-4 bounded phases, sequential independent reviews,
-  and fast scouting/synthesis instead of one broad c3 audit.
+- Delegation guidance now follows an adaptive, parent-orchestrated policy:
+  simple work stays in Pi, scouting is conditional, independent checks use
+  separate bounded calls, chains require data dependency, and Pi synthesizes
+  results by default.
 - Both tools declare sequential execution to respect OpenSquilla's profile-wide
   writer lock; lock conflicts now return a concise actionable error.
 

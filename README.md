@@ -97,14 +97,13 @@ While the subprocess is running, Pi receives periodic updates containing elapsed
 
 ### Chain mode
 
-Use a chain only when later phases depend on earlier output. Each step is an independent OpenSquilla turn with its own routing; `{previous}` inlines a bounded prior-step handoff.
+Use a chain only when a later step cannot be specified without an earlier result. Each step is an independent OpenSquilla turn with its own routing; `{previous}` inlines a bounded prior-step handoff.
 
 ```typescript
 opensquilla_chain({
   steps: [
-    { task: "List the auth entry points and return a concise structured map.", effort: "fast" },
-    { task: "Using {previous}, inspect only the highest-risk path and return at most three findings." },
-    { task: "Using {previous}, synthesize the smallest safe recommendation.", effort: "fast" }
+    { task: "Extract the public API and backend capability matrix in at most 20 lines.", effort: "fast" },
+    { task: "Using {previous}, report only API promises unsupported by the backend, with file:line evidence." }
   ],
   permissions: "restricted",   // chain-level default; per-step override allowed
   effort: "balanced",
@@ -116,16 +115,18 @@ Returns the final step's text plus `details.steps[]` with each step's routing, e
 
 ## Task Sizing
 
-Broad prompts tend to route to c3 and can spend the full timeout. Prefer these shapes:
+Delegation is adaptive and parent-orchestrated. Broad prompts tend to route to c3 and can spend the full timeout, but a fixed review pipeline also wastes work on already-scoped tasks. Apply this decision order:
 
-- Independent audit dimensions: issue 2-4 separate `opensquilla_subagent` calls sequentially, for example correctness, security, and tests. Each result returns to the parent before the next call.
-- Dependent work: use a 2-4 step chain such as `scout (fast) -> focused review (balanced) -> concise synthesis (fast)`.
-- Scope every task to one module, workflow, risk class, or explicit file set. Put an output count/size limit in the task.
-- Avoid a single prompt like "read the whole repository and perform a complete deep review" unless the user explicitly wants a slow c3 audit.
+1. Handle straightforward questions, small edits, and a few local reads directly in Pi. A subagent is optional, not a required stage.
+2. When scope is clear, give one `opensquilla_subagent` call one bounded objective. Name the module, workflow, file set, or risk class; cap the output and require an evidence format such as `file:line`.
+3. When relevant entry points, call paths, or key files are unknown, use one `fast` explorer. It should return a concise map and essential files, not perform a complete bug review. Pi then reads those files and decides what to delegate next.
+4. When scope is known but several independent concerns matter, select relevant lenses and issue two or three separate focused `opensquilla_subagent` calls. For example, rollback behavior and test coverage may be independent checks; do not hard-code every possible reviewer into every task.
+5. Use `opensquilla_chain` only for genuine data dependency, where a later step consumes an earlier result through `{previous}`. Extracting an API/capability matrix and then checking mismatches is a chain; independent correctness, security, or test reviews are separate calls.
+6. Let the Pi parent synthesize by default. It reads important source files, deduplicates and prioritizes specialist findings, and communicates the result. Do not add a final `fast` synthesis subagent unless the material is too large or specialized for reliable parent synthesis.
 
-Very small chain steps are also inefficient because each step repeats OpenSquilla startup and routing. Two to four meaningful phases is the intended range.
+Independent calls may be emitted as sibling tool calls in one Pi response, while chain steps are explicitly data-dependent turns inside one tool call. The extension marks both tools as sequential, so Pi executes sibling calls in order to avoid collisions with OpenSquilla 0.5.0rc4's profile-wide writer lock. Separate Pi processes or projects using the same profile can still conflict; wait for the active run or configure another profile.
 
-OpenSquilla 0.5.0rc4 holds a profile-wide writer lock for the duration of a run. The extension marks both tools as sequential so sibling tool calls in one Pi response do not collide. Separate Pi processes or projects using the same OpenSquilla profile can still conflict; wait for the active run or configure another profile.
+Keep chains to two to four meaningful steps with concise handoffs. Very small steps are inefficient because each repeats OpenSquilla startup and routing.
 
 ## Configuration
 

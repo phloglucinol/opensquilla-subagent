@@ -7,7 +7,9 @@ description: |
   c1 pro / c2 kimi-code / c3 glm-5.2). Use for isolated investigations, code
   reviews, or synthesis that benefits from an independent context and
   automatic model selection. NOT for simple edits, reading files, or work
-  needing shared Pi session state.
+  needing shared Pi session state. Delegate adaptively: one bounded objective
+  per call, chains only for genuine dependencies, and parent synthesis by
+  default.
 ---
 
 # OpenSquilla Subagent
@@ -24,8 +26,8 @@ text, usage, and routing metadata.
   context window.
 - **Independent review**: spawn a reviewer whose model is chosen by OpenSquilla's
   SquillaRouter based on task difficulty (c0–c3), not by the parent.
-- **Synthesis offload**: hand off a report, comparison, or analysis that
-  benefits from a different model tier and a clean context.
+- **Specialist analysis**: hand off one bounded report, comparison, or risk
+  analysis that benefits from a different model tier and a clean context.
 - **Cost-aware delegation**: trivial subtasks route to cheap models
   (deepseek-v4-flash), complex ones route to stronger models automatically.
 
@@ -102,16 +104,15 @@ require the gateway service.
 
 ## Chain Tool
 
-Use `opensquilla_chain` only when later phases depend on earlier output. Each
-step is an independent `opensquilla agent` turn, so SquillaRouter classifies
-and routes every step separately.
+Use `opensquilla_chain` only when a later step cannot be specified without an
+earlier result. Each step is an independent `opensquilla agent` turn, so
+SquillaRouter classifies and routes every step separately.
 
 ```typescript
 opensquilla_chain({
   steps: [
-    { task: "Scout the auth entry points; return a concise map.", effort: "fast" },
-    { task: "Using {previous}, inspect only the highest-risk path." },
-    { task: "Using {previous}, synthesize one recommendation.", effort: "fast" }
+    { task: "Extract the public API and backend capability matrix in at most 20 lines.", effort: "fast" },
+    { task: "Using {previous}, report only API promises unsupported by the backend, with file:line evidence." }
   ],
   permissions: "restricted",
   previousMaxBytes: 12288
@@ -126,24 +127,61 @@ opensquilla_chain({
 - Per-step `permissions`/`effort`/`thinking`/`previousMaxBytes`/`timeout`/
   `maxIterations` override chain defaults.
 
-## Task Allocation
+## Adaptive Delegation
 
-- Split broad audits into 2-4 independent calls by module or review dimension,
-  and execute them sequentially. OpenSquilla holds a profile-wide writer lock.
-- Use a chain only for data-dependent phases such as
-  `scout (fast) -> focused review (balanced) -> synthesis (fast)`.
-- Scope each task to one module, workflow, risk class, or explicit file set,
-  and request a bounded output.
-- Avoid one prompt asking for a complete repository-wide deep audit unless the
-  user explicitly accepts c3 latency.
-- Do not request concurrent OpenSquilla calls on the same profile. Both tools
-  are marked sequential; another Pi process may still hold the profile lock.
+Apply this decision order:
 
-## Example
+1. **Do not delegate simple work.** Answer straightforward questions, make
+   small edits, and perform a few local reads directly in Pi.
+2. **Use one focused subagent when scope is clear.** Give it one bounded
+   objective, explicit scope, an output limit, and an evidence format.
+3. **Scout only when scope is unknown.** One `fast` explorer may identify entry
+   points, call paths, and essential files, but should not perform the full bug
+   review. Pi then reads those files and decides whether specialists are needed.
+4. **Use separate calls for independent checks.** When scope is known, select
+   relevant lenses and issue two or three focused `opensquilla_subagent` calls.
+   They may be sibling tool calls; Pi executes them sequentially to avoid
+   profile-lock collisions. Another process using the same profile can still
+   conflict.
+5. **Use a chain only for genuine dependency.** A later step must consume an
+   earlier result; independent reviewers do not belong in a chain.
+6. **Synthesize in the parent.** Pi deduplicates and prioritizes results by
+   default. Do not add a `fast` synthesis subagent unless offloading is
+   explicitly justified.
+
+Keep reviewer tasks concrete: name the scope, cap the findings, require
+`file:line` evidence, and exclude unrelated modules.
+
+## Examples
+
+No delegation: read two named files and make a small local edit with Pi's
+built-in tools.
+
+One focused subagent:
 
 ```typescript
 opensquilla_subagent({
-  task: "Review the current `git diff` for correctness regressions and missing tests. Return findings as a bulleted list with file:line references.",
+  task: "Inspect src/session.ts for state-restoration bugs. Report at most 3 findings with file:line evidence.",
   permissions: "restricted"
 })
 ```
+
+Optional fast scout when the relevant scope is unknown:
+
+```typescript
+opensquilla_subagent({
+  task: "Map the auth request path and list at most 5 essential files. Do not review for bugs.",
+  effort: "fast",
+  permissions: "restricted"
+})
+```
+
+Independent specialists: issue separate bounded calls for only the relevant
+lenses, such as rollback behavior and concrete missing regression tests. Do not
+pass one result into the other.
+
+Dependent chain: first extract an API/capability matrix, then use `{previous}`
+to verify mismatches that cannot be scoped before the matrix exists.
+
+Parent synthesis: after reading specialist results and key source files, Pi
+deduplicates findings, orders them by severity, and writes the final response.

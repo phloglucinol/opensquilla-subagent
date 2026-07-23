@@ -8,6 +8,8 @@ import registerExtension from "../src/extension/index.ts";
 
 interface RegisteredTool {
 	name: string;
+	description: string;
+	promptGuidelines?: string[];
 	parameters: Record<string, unknown>;
 	executionMode?: "sequential" | "parallel";
 	execute: (...args: any[]) => Promise<any>;
@@ -103,6 +105,35 @@ test("schemas make documented defaults optional and reject extra properties", ()
 	assert.equal(chain.executionMode, "sequential");
 	assert.equal(chainSchema.properties.previousMaxBytes.minimum, 1024);
 	assert.equal(chainSchema.properties.previousMaxBytes.maximum, 32 * 1024);
+});
+
+test("tool guidance encodes adaptive parent-orchestrated delegation", () => {
+	const { subagent, chain } = createHarness(async () => {
+		throw new Error("not called");
+	});
+	const subagentGuidance = subagent.promptGuidelines ?? [];
+	const chainGuidance = chain.promptGuidelines ?? [];
+
+	assert.ok(subagentGuidance.some((line) => /one bounded objective/i.test(line)));
+	assert.ok(subagentGuidance.some((line) => /fast scout only when .*scope.*unknown/i.test(line)));
+	assert.ok(subagentGuidance.some((line) => /separate opensquilla_subagent calls for independent checks/i.test(line)));
+	assert.ok(chainGuidance.some((line) => /only when a later step depends on earlier output/i.test(line)));
+	assert.ok(
+		[...subagentGuidance, ...chainGuidance].some(
+			(line) => /Pi parent performs final synthesis by default/i.test(line),
+		),
+	);
+	assert.ok(
+		subagentGuidance.some(
+			(line) =>
+				/sibling calls in one Pi response execute sequentially to avoid profile-lock collisions/i.test(
+					line,
+				) && /another process using the same profile can still conflict/i.test(line),
+		),
+	);
+	assert.match(subagent.description, /Simple work stays with Pi/i);
+	assert.equal(subagent.executionMode, "sequential");
+	assert.equal(chain.executionMode, "sequential");
 });
 
 test("single delegation applies defaults, persists output, and reports Pi usage", async () => {
