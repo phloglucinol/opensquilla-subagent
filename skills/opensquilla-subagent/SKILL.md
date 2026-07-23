@@ -79,6 +79,29 @@ again or handled inline.
 
 Verify with `opensquilla doctor` and `opensquilla models probe`.
 
+## Chain Tool
+
+For multi-phase work where each phase deserves its own model tier, use
+`opensquilla_chain`. Each step is an independent `opensquilla agent` turn, so
+SquillaRouter classifies and routes each step separately (step 1 may use c0,
+step 3 may use c3).
+
+```typescript
+opensquilla_chain({
+  steps: [
+    { task: "Scout: list the auth module files and summarize each in one line." },
+    { task: "Based on {previous}, review for the highest-risk correctness issue." },
+    { task: "Based on {previous}, propose the smallest safe fix. Do not edit." }
+  ],
+  permissions: "restricted"
+})
+```
+
+- `{previous}` is replaced with the prior step's output text.
+- A failed step stops the chain; `details.failedAt` reports which step.
+- `details.steps[].routing` has each step's tier/model/source.
+- Max 10 steps. Per-step `permissions`/`timeout`/`maxIterations` override defaults.
+
 ## Example
 
 ```typescript

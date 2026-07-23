@@ -88,6 +88,25 @@ You can also ask in plain language:
 - `details.routing` — `{ routed_tier, routed_model, routing_source }` (e.g. `c0` / `deepseek-v4-flash` / `v4_phase3`).
 - `details.usage` — token accounting from the OpenSquilla turn.
 
+### Chain mode
+
+For multi-phase work where each phase deserves its own model tier, run a chain. Each step is an independent OpenSquilla turn with its own routing; `{previous}` inlines the prior step's output.
+
+```typescript
+opensquilla_chain({
+  steps: [
+    { task: "List the main types and entry points of the auth module." },
+    { task: "Based on {previous}, review for the highest-risk regression." },
+    { task: "Based on {previous}, propose the smallest safe fix. Do not edit files." }
+  ],
+  permissions: "restricted",   // chain-level default; per-step override allowed
+  timeout: 600,                // chain-level default
+  maxIterations: 20            // chain-level default
+})
+```
+
+Returns the final step's text plus `details.steps[]` with each step's routing. A failed step stops the chain with `details.failedAt`.
+
 ## Configuration
 
 OpenSquilla's router tier mapping lives in `~/.opensquilla/config.toml` under `[squilla_router.tiers]`. The default mapping targets TokenRhythm:
