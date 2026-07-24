@@ -196,6 +196,10 @@ test("schemas make documented defaults optional and reject extra properties", ()
 	assert.equal(chain.executionMode, undefined);
 	assert.equal(chainSchema.properties.previousMaxBytes.minimum, 1024);
 	assert.equal(chainSchema.properties.previousMaxBytes.maximum, 32 * 1024);
+	assert.deepEqual(chainSchema.properties.resume.required, ["fromStep"]);
+	assert.equal(chainSchema.properties.resume.additionalProperties, false);
+	assert.equal(chainSchema.properties.resume.properties.fromStep.minimum, 1);
+	assert.equal(chainSchema.properties.resume.properties.fromStep.maximum, 10);
 });
 
 test("tool guidance encodes adaptive parent-orchestrated delegation", () => {
@@ -486,8 +490,200 @@ test("chain stops on a timed-out middle step and returns completed steps", async
 	assert.equal(result.details.steps[1].routing, null);
 	assert.equal(result.details.steps[1].outputPath, result.details.steps[1].scratchPath);
 	assert.ok(Array.isArray(result.details.steps[1].activities));
+	assert.deepEqual(result.details.resume, {
+		fromStep: 2,
+		previousOutputPath: result.details.steps[0].outputPath,
+	});
 	assert.match(result.content[0].text, /timed out at step 2\/3/i);
 	assert.match(result.content[0].text, /step 1: c1 \/ deepseek-v4-pro \(balanced, v4_phase3\)/);
+});
+
+test("chain resumes from a timed-out middle step using prior output", async () => {
+	const priorOutputPath = join(testTmpDir, "prior-result.txt");
+	await writeFile(priorOutputPath, "first output", "utf8");
+	const messages: string[] = [];
+	let calls = 0;
+	const { chain } = createHarness(async (_command, args) => {
+		messages.push(argValue(args, "--message")!);
+		calls++;
+		return {
+			code: 0,
+			killed: false,
+			stdout: payload({
+				text: calls === 1 ? "second output" : "third output",
+				usage: {
+					input_tokens: 2,
+					output_tokens: 1,
+					total_tokens: 3,
+					cost_usd: 0.1,
+				},
+			}),
+			stderr: "",
+		};
+	});
+
+	const result = await chain.execute(
+		"chain-resume-middle",
+		{
+			steps: [
+				{ task: "First" },
+				{ task: "Second with {previous}" },
+				{ task: "Third with {previous}" },
+			],
+			resume: { fromStep: 2, previousOutputPath: priorOutputPath },
+		},
+		undefined,
+		undefined,
+		context(),
+	);
+
+	assert.equal(calls, 2);
+	assert.equal(messages[0], "Second with first output");
+	assert.equal(messages[1], "Third with second output");
+	assert.deepEqual(result.details.steps.map((step: any) => step.step), [2, 3]);
+	assert.equal(result.details.resumedFromStep, 2);
+	assert.deepEqual(result.usage, {
+		input: 4,
+		output: 2,
+		cacheRead: 0,
+		cacheWrite: 0,
+		reasoning: 0,
+		totalTokens: 6,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.2 },
+	});
+});
+
+test("a resumed step that times out preserves its prior-output checkpoint", async () => {
+	const priorOutputPath = join(testTmpDir, "resume-timeout-prior.txt");
+	await writeFile(priorOutputPath, "first output", "utf8");
+	const { chain } = createHarness(async () => ({
+		code: 1,
+		killed: true,
+		stdout: "",
+		stderr: "Agent turn timed out after 300.0s",
+	}));
+
+	const result = await chain.execute(
+		"chain-resume-timeout",
+		{
+			steps: [{ task: "First" }, { task: "Second with {previous}" }],
+			resume: { fromStep: 2, previousOutputPath: priorOutputPath },
+		},
+		undefined,
+		undefined,
+		context(),
+	);
+
+	assert.equal(result.details.resumedFromStep, 2);
+	assert.deepEqual(result.details.resume, { fromStep: 2, previousOutputPath: priorOutputPath });
+	assert.match(result.content[0].text, /details\.resume checkpoint/);
+});
+
+test("first-step timeout returns metadata that resumes from step one", async () => {
+	let calls = 0;
+	const { chain } = createHarness(async () => {
+		calls++;
+		if (calls === 1) {
+			return {
+				code: 1,
+				killed: true,
+				stdout: "",
+				stderr: "Agent turn timed out after 300.0s",
+			};
+		}
+		return { code: 0, killed: false, stdout: payload({ text: "recovered" }), stderr: "" };
+	});
+
+	const timedOut = await chain.execute(
+		"chain-timeout-first",
+		{ steps: [{ task: "First" }] },
+		undefined,
+		undefined,
+		context(),
+	);
+	assert.deepEqual(timedOut.details.resume, { fromStep: 1 });
+
+	const resumed = await chain.execute(
+		"chain-resume-first",
+		{ steps: [{ task: "First" }], resume: timedOut.details.resume },
+		undefined,
+		undefined,
+		context(),
+	);
+	assert.equal(calls, 2);
+	assert.equal(resumed.details.resumedFromStep, 1);
+	assert.deepEqual(resumed.details.steps.map((step: any) => step.step), [1]);
+});
+
+test("chain resume validates the checkpoint and prior output path", async () => {
+	let calls = 0;
+	const { chain } = createHarness(async () => {
+		calls++;
+		return { code: 0, killed: false, stdout: payload(), stderr: "" };
+	});
+	const steps = [{ task: "First" }, { task: "Second with {previous}" }];
+
+	await assert.rejects(
+		chain.execute(
+			"resume-range",
+			{ steps, resume: { fromStep: 3 } },
+			undefined,
+			undefined,
+			context(),
+		),
+		/resume\.fromStep must be between 1 and 2/,
+	);
+	await assert.rejects(
+		chain.execute(
+			"resume-missing-prior",
+			{ steps, resume: { fromStep: 2 } },
+			undefined,
+			undefined,
+			context(),
+		),
+		/previousOutputPath is required/,
+	);
+	await assert.rejects(
+		chain.execute(
+			"resume-relative-prior",
+			{ steps, resume: { fromStep: 2, previousOutputPath: "relative.txt" } },
+			undefined,
+			undefined,
+			context(),
+		),
+		/must be an absolute path/,
+	);
+	await assert.rejects(
+		chain.execute(
+			"resume-first-with-prior",
+			{ steps, resume: { fromStep: 1, previousOutputPath: "/tmp/prior.txt" } },
+			undefined,
+			undefined,
+			context(),
+		),
+		/must be omitted when fromStep is 1/,
+	);
+	assert.equal(calls, 0);
+});
+
+test("chain resume does not require prior output when the resumed step is independent", async () => {
+	let calls = 0;
+	const { chain } = createHarness(async () => {
+		calls++;
+		return { code: 0, killed: false, stdout: payload({ text: "resumed" }), stderr: "" };
+	});
+
+	const result = await chain.execute(
+		"resume-independent",
+		{ steps: [{ task: "Skipped" }, { task: "Independent" }], resume: { fromStep: 2 } },
+		undefined,
+		undefined,
+		context(),
+	);
+
+	assert.equal(calls, 1);
+	assert.equal(result.details.resumedFromStep, 2);
+	assert.deepEqual(result.details.steps.map((step: any) => step.step), [2]);
 });
 
 test("non-timeout nonzero exits still throw", async () => {

@@ -14,9 +14,9 @@
 
 import { spawn as realSpawn } from "node:child_process";
 import { readdirSync, readFileSync, rmSync } from "node:fs";
-import { chmod, copyFile, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import * as readline from "node:readline";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -964,6 +964,8 @@ export default function (pi: ExtensionAPI) {
 			"Each step is an independent turn with separate SquillaRouter classification",
 			"and visible activity updates.",
 			"Use {previous} only for concise handoffs; 12KB is inserted by default.",
+			"After a structured timeout, resume explicitly from the failed step using the",
+			"returned resume metadata; no hidden chain state is retained.",
 			"Use separate opensquilla_subagent calls for independent checks. Pi performs",
 			"final synthesis by default. Each call uses an isolated OpenSquilla profile, so",
 			"sibling calls in one Pi response can execute concurrently.",
@@ -982,6 +984,24 @@ export default function (pi: ExtensionAPI) {
 					maxItems: 10,
 					description: "Ordered steps (max 10). Each is an independent OpenSquilla turn with its own routing.",
 				}),
+				resume: Type.Optional(
+					Type.Object(
+						{
+							fromStep: Type.Integer({
+								minimum: 1,
+								maximum: 10,
+								description: "1-based step to execute first; earlier steps are not rerun",
+							}),
+							previousOutputPath: Type.Optional(
+								Type.String({
+									minLength: 1,
+									description: "Absolute outputPath of step fromStep-1, required when the resumed step uses {previous}",
+								}),
+							),
+						},
+						{ additionalProperties: false },
+					),
+				),
 				permissions: Type.Optional(
 					StringEnum(["restricted", "bypass", "full"] as const, {
 						description: PERMS_DESC,
@@ -1065,10 +1085,42 @@ export default function (pi: ExtensionAPI) {
 				outputPath: string;
 			}> = [];
 			const usages: Usage[] = [];
+			let startIndex = 0;
 			let previous = "";
 			let previousOutputPath: string | undefined;
+			if (params.resume) {
+				if (!Number.isInteger(params.resume.fromStep)) {
+					throw new Error("resume.fromStep must be an integer");
+				}
+				if (params.resume.fromStep < 1 || params.resume.fromStep > params.steps.length) {
+					throw new Error(
+						`resume.fromStep must be between 1 and ${params.steps.length}`,
+					);
+				}
+				startIndex = params.resume.fromStep - 1;
+				previousOutputPath = params.resume.previousOutputPath;
+				if (startIndex === 0 && previousOutputPath) {
+					throw new Error("resume.previousOutputPath must be omitted when fromStep is 1");
+				}
+				if (previousOutputPath) {
+					if (!isAbsolute(previousOutputPath)) {
+						throw new Error("resume.previousOutputPath must be an absolute path");
+					}
+					try {
+						previous = await readFile(previousOutputPath, "utf8");
+					} catch (err) {
+						throw new Error(
+							`failed to read resume.previousOutputPath: ${err instanceof Error ? err.message : String(err)}`,
+						);
+					}
+				} else if (startIndex > 0 && params.steps[startIndex].task.includes("{previous}")) {
+					throw new Error(
+						"resume.previousOutputPath is required because the resumed step uses {previous}",
+					);
+				}
+			}
 
-			for (let i = 0; i < params.steps.length; i++) {
+			for (let i = startIndex; i < params.steps.length; i++) {
 				if (signal?.aborted) throw new Error("chain aborted");
 				const step = params.steps[i];
 				const perms = step.permissions ?? defaultPerms;
@@ -1149,7 +1201,7 @@ export default function (pi: ExtensionAPI) {
 						completed,
 						`Timed-out step ${i + 1} activities: ${activitySummary}`,
 						`Scratch path: ${turn.scratchPath}`,
-						"You can narrow the scope and retry, synthesize from local reads using the explored files as leads, or stop.",
+						"Retry this chain with the returned details.resume checkpoint, narrow the scope, synthesize from local reads, or stop.",
 					].join("\n");
 					return {
 						content: [{ type: "text", text: out }],
@@ -1158,6 +1210,11 @@ export default function (pi: ExtensionAPI) {
 							elapsedSeconds: turn.elapsedSeconds,
 							scratchPath: turn.scratchPath,
 							steps: [...results, timedOutStep],
+							resume: {
+								fromStep: i + 1,
+								...(previousOutputPath ? { previousOutputPath } : {}),
+							},
+							...(params.resume ? { resumedFromStep: startIndex + 1 } : {}),
 						},
 						usage: combineUsages(usages),
 					};
@@ -1200,7 +1257,11 @@ export default function (pi: ExtensionAPI) {
 
 			return {
 				content: [{ type: "text", text: out }],
-				details: { steps: results, finalOutputPath },
+				details: {
+					steps: results,
+					finalOutputPath,
+					...(params.resume ? { resumedFromStep: startIndex + 1 } : {}),
+				},
 				usage: combineUsages(usages),
 			};
 		},

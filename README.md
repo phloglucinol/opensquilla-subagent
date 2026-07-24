@@ -91,7 +91,7 @@ While the subprocess is running, Pi reads OpenSquilla's JSONL event stream from 
 - `content` — subagent's final text, truncated to Pi's 50KB / 2000-line tool limits. Full output is saved to `details.outputPath` with owner-only permissions.
 - `details.routing` — `{ routed_tier, routed_model, routing_source }` (e.g. `c0` / `deepseek-v4-flash` / `v4_phase3`).
 - `details.usage` — raw token accounting from the OpenSquilla turn.
-- `details.activities` — recent sanitized routing and tool-start activity derived from the event stream.
+- `details.activities` — recent sanitized routing and tool activity derived from the event stream.
 - top-level `usage` — the same usage converted to Pi's accounting format, so nested model cost appears in session totals.
 
 If a subagent times out, the tool returns a structured result with `details.timedOut`, elapsed time, recent activities, and the scratch path, rather than throwing. The parent can narrow scope, synthesize from local reads, or stop. The extension never auto-retries a timed-out prompt.
@@ -112,7 +112,21 @@ opensquilla_chain({
 })
 ```
 
-Returns the final step's text plus `details.steps[]` with each step's routing, effort, activity, and raw usage. The chain reports aggregate usage to Pi. `{previous}` is capped at 12KB/500 lines by default before insertion into the next prompt; it can be raised to 32KB when needed. A timed-out step stops the chain and returns completed-step plus timeout details; other failed steps throw a tool error that includes completed-step routing and output paths.
+Returns the final step's text plus `details.steps[]` with each newly executed step's routing, effort, activity, and raw usage. The chain reports aggregate usage to Pi. `{previous}` is capped at 12KB/500 lines by default before insertion into the next prompt; it can be raised to 32KB when needed. A timed-out step stops the chain and returns completed-step details plus a machine-usable `details.resume` checkpoint; other failed steps throw a tool error that includes completed-step routing and output paths.
+
+Resume a timed-out chain by passing the original `steps` and the returned checkpoint:
+
+```typescript
+opensquilla_chain({
+  steps: originalSteps,
+  resume: {
+    fromStep: 2,
+    previousOutputPath: "/tmp/opensquilla-subagent-.../result.txt"
+  }
+})
+```
+
+`fromStep` is 1-based, so a first-step timeout resumes with `{ fromStep: 1 }`. Earlier steps are not rerun. `previousOutputPath` must be absolute and is required only when the resumed step contains `{previous}`; use the path returned in `details.resume`, not hidden session state. Resumed calls report usage only for the steps executed by that call and expose `details.resumedFromStep`.
 
 ## Task Sizing
 

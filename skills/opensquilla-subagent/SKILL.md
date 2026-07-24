@@ -122,15 +122,20 @@ opensquilla_chain({
     { task: "Extract the public API and backend capability matrix in at most 20 lines.", effort: "fast" },
     { task: "Using {previous}, report only API promises unsupported by the backend, with file:line evidence." }
   ],
+  // On retry after timeout: resume: timedOutResult.details.resume
   permissions: "restricted",
   previousMaxBytes: 12288
 })
 ```
 
 - `{previous}` is capped at 12KB/500 lines by default; max override is 32KB.
-- A timed-out step stops the chain and returns completed-step plus timeout
-  details; other failed steps throw a tool error with completed-step
-  routing/output paths.
+- A timed-out step stops the chain and returns completed-step details plus a
+  machine-usable `details.resume` checkpoint. Retry with the original `steps`
+  and `resume: { fromStep, previousOutputPath? }`; `fromStep` is 1-based and
+  `previousOutputPath` is required only when that step uses `{previous}`.
+  Resumed calls report usage only for newly executed steps and expose
+  `details.resumedFromStep`. Other failed steps throw a tool error with
+  completed-step routing/output paths.
 - `details.steps[]` includes routing, effort, activity, and raw usage.
 - Aggregate nested LLM usage is reported to Pi.
 - Max 10 steps, but prefer 2-4 meaningful phases to avoid repeated startup cost.
