@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Structured timeout results preserve elapsed time, activities, and scratch
+  path instead of throwing a generic error, so the Pi parent can narrow
+  scope, synthesize locally, or stop.
 - Node test suite for schemas, permission gates, subprocess arguments, usage
   accounting, chain context limits, failure cleanup, and output persistence.
 - A 120KB task limit with a clear error for OpenSquilla's single-argument

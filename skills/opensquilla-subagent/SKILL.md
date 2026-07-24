@@ -84,6 +84,10 @@ full output saved to a temp file) plus `details`:
 - `details.outputPath` — temp file with the full, untruncated output
 - `details.usage` — raw token accounting from the OpenSquilla turn
 - `details.activities` — recent sanitized activity captured during the run
+- `details.timedOut` — `true` when a timeout returns elapsed time, recent
+  activities, and `details.scratchPath` instead of throwing; the parent can
+  narrow scope, synthesize locally, or stop, and the extension does not retry
+  the prompt automatically
 - top-level `usage` — Pi-compatible nested LLM usage for session totals
 
 Use the routing tier to decide whether a follow-up task should be delegated
@@ -120,7 +124,9 @@ opensquilla_chain({
 ```
 
 - `{previous}` is capped at 12KB/500 lines by default; max override is 32KB.
-- A failed step throws a tool error with completed-step routing/output paths.
+- A timed-out step stops the chain and returns completed-step plus timeout
+  details; other failed steps throw a tool error with completed-step
+  routing/output paths.
 - `details.steps[]` includes routing, effort, activity, and raw usage.
 - Aggregate nested LLM usage is reported to Pi.
 - Max 10 steps, but prefer 2-4 meaningful phases to avoid repeated startup cost.

@@ -93,6 +93,23 @@ interface ActivityMonitor {
 	stop(): Promise<string[]>;
 }
 
+interface RunTurnSuccess {
+	timedOut: false;
+	payload: Payload;
+	outputPath: string;
+	activities: string[];
+}
+
+interface RunTurnTimeout {
+	timedOut: true;
+	elapsedSeconds: number;
+	activities: string[];
+	scratchPath: string;
+	message: string;
+}
+
+type RunTurnResult = RunTurnSuccess | RunTurnTimeout;
+
 const EFFORT_DEFAULTS: Record<
 	Effort,
 	{ timeout: number; maxIter: number; thinking?: Thinking; providerRetries: number }
@@ -344,7 +361,7 @@ async function startActivityMonitor(input: {
 	};
 }
 
-/** Run one `opensquilla agent --json` turn. Throws on any failure. */
+/** Run one `opensquilla agent --json` turn. Throws on non-timeout failures. */
 async function runTurn(
 	pi: ExtensionAPI,
 	input: {
@@ -359,7 +376,8 @@ async function runTurn(
 		signal?: AbortSignal;
 		onProgress?: ProgressCb;
 	},
-): Promise<{ payload: Payload; outputPath: string; activities: string[] }> {
+): Promise<RunTurnResult> {
+	const startedAt = Date.now();
 	if (input.signal?.aborted) throw new Error("OpenSquilla subagent aborted");
 	assertTaskSize(input.task);
 
@@ -415,17 +433,32 @@ async function runTurn(
 			activities = await monitor.stop();
 		}
 		if (input.signal?.aborted) throw new Error("OpenSquilla subagent aborted");
-		if (result.killed) {
-			throw new Error(`OpenSquilla subagent was killed after ${input.timeout + 15} seconds`);
+		const detail = result.stderr.trim() || result.stdout.trim();
+		const isTimeout = result.killed || /timed out after/i.test(detail);
+		if (isTimeout) {
+			const elapsedSeconds = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+			const recentActivities = activities.slice(-8);
+			const activitySummary =
+				recentActivities.length > 0
+					? recentActivities.join(", ")
+					: "no recent activity was captured";
+			keepScratch = true;
+			return {
+				timedOut: true,
+				elapsedSeconds,
+				activities: recentActivities,
+				scratchPath: scratch,
+				message: `OpenSquilla subagent timed out after ${elapsedSeconds}s. It was exploring: ${activitySummary}. Scratch path: ${scratch}. You can narrow the scope and retry, synthesize from local reads using the explored files as leads, or stop.`,
+			};
 		}
 		if (result.code !== 0) {
-			const detail = result.stderr.trim() || result.stdout.trim() || `exit ${result.code}`;
-			if (detail.includes("ProfileLockBusyError")) {
+			const failureDetail = detail || `exit ${result.code}`;
+			if (failureDetail.includes("ProfileLockBusyError")) {
 				throw new Error(
 					"OpenSquilla profile is busy in another process. Calls using the same profile cannot run concurrently; wait for the other run to finish or configure a separate OpenSquilla profile.",
 				);
 			}
-			throw new Error(`opensquilla exited ${result.code}: ${detail.slice(0, 500)}`);
+			throw new Error(`opensquilla exited ${result.code}: ${failureDetail.slice(0, 500)}`);
 		}
 
 		let payload: Payload;
@@ -445,7 +478,7 @@ async function runTurn(
 		const outputPath = join(scratch, "result.txt");
 		await writeFile(outputPath, payload.text || "", { encoding: "utf8", mode: 0o600 });
 		keepScratch = true;
-		return { payload, outputPath, activities };
+		return { timedOut: false, payload, outputPath, activities };
 	} finally {
 		if (!keepScratch) {
 			await rm(scratch, { recursive: true, force: true }).catch(() => {});
@@ -573,7 +606,7 @@ export default function (pi: ExtensionAPI) {
 			const onProgress: ProgressCb = (t) =>
 				onUpdate?.({ content: [{ type: "text", text: t }], details: undefined });
 
-			const { payload, outputPath, activities } = await runTurn(pi, {
+			const turn = await runTurn(pi, {
 				task: params.task,
 				perms,
 				timeout: options.timeout,
@@ -586,6 +619,21 @@ export default function (pi: ExtensionAPI) {
 				onProgress,
 			});
 
+			if (turn.timedOut) {
+				return {
+					content: [{ type: "text", text: turn.message }],
+					details: {
+						timedOut: true,
+						elapsedSeconds: turn.elapsedSeconds,
+						activities: turn.activities,
+						scratchPath: turn.scratchPath,
+						effort: options.effort,
+					},
+					usage: undefined,
+				};
+			}
+
+			const { payload, outputPath, activities } = turn;
 			const text = formatWithRouting(
 				payload.text || "(no output)",
 				payload.routing,
@@ -819,6 +867,49 @@ export default function (pi: ExtensionAPI) {
 						`chain failed at step ${i + 1}: ${msg}${completed ? `\nCompleted steps:\n${completed}` : ""}`,
 					);
 				}
+				if (turn.timedOut) {
+					const timedOutStep = {
+						step: i + 1,
+						taskPreview: step.task.slice(0, 120),
+						status: "timed_out",
+						timedOut: true,
+						elapsedSeconds: turn.elapsedSeconds,
+						effort: options.effort,
+						thinking: options.thinking,
+						activities: turn.activities,
+						scratchPath: turn.scratchPath,
+					};
+					const completed =
+						results.length > 0
+							? results
+									.map(
+										(r) =>
+											`  step ${r.step}: ${r.routing?.routed_tier ?? "?"} / ${r.routing?.routed_model ?? "?"} (${r.effort}, ${r.routing?.routing_source ?? "?"}); output=${r.outputPath}`,
+									)
+									.join("\n")
+							: "  (none)";
+					const activitySummary =
+						turn.activities.length > 0 ? turn.activities.join(", ") : "none captured";
+					const out = [
+						`Chain timed out at step ${i + 1}/${params.steps.length} after ${turn.elapsedSeconds}s.`,
+						"Completed steps:",
+						completed,
+						`Timed-out step ${i + 1} activities: ${activitySummary}`,
+						`Scratch path: ${turn.scratchPath}`,
+						"You can narrow the scope and retry, synthesize from local reads using the explored files as leads, or stop.",
+					].join("\n");
+					return {
+						content: [{ type: "text", text: out }],
+						details: {
+							timedOut: true,
+							elapsedSeconds: turn.elapsedSeconds,
+							scratchPath: turn.scratchPath,
+							steps: [...results, timedOutStep],
+						},
+						usage: combineUsages(usages),
+					};
+				}
+
 				previous = turn.payload.text || "";
 				previousOutputPath = turn.outputPath;
 				const usage = toPiUsage(turn.payload.usage);

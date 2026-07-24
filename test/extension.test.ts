@@ -292,6 +292,140 @@ test("chain truncates previous output, aggregates usage, and avoids a duplicate 
 	assert.equal(tempEntries.some((name) => name.startsWith("opensquilla-out-")), false);
 });
 
+test("subagent timeout returns structured details without routing metadata", async () => {
+	const { subagent } = createHarness(async () => ({
+		code: 1,
+		killed: false,
+		stdout: "",
+		stderr: "Agent turn timed out after 300.0s",
+	}));
+
+	const result = await subagent.execute(
+		"call-timeout-structured",
+		{ task: "Inspect timeout behavior" },
+		undefined,
+		undefined,
+		context(),
+	);
+
+	assert.equal(result.details.timedOut, true);
+	assert.equal(typeof result.details.elapsedSeconds, "number");
+	assert.ok(Array.isArray(result.details.activities));
+	assert.equal(typeof result.details.scratchPath, "string");
+	assert.match(result.content[0].text, /timed out/i);
+	assert.match(result.content[0].text, /narrow the scope and retry/i);
+	assert.match(result.content[0].text, /synthesize from local reads/i);
+	assert.match(result.content[0].text, /or stop/i);
+	assert.equal("routing" in result.details, false);
+	assert.equal("outputPath" in result.details, false);
+	assert.equal(result.usage, undefined);
+});
+
+test("subagent timeout preserves its scratch directory", async () => {
+	const { subagent } = createHarness(async () => ({
+		code: 1,
+		killed: false,
+		stdout: "",
+		stderr: "Agent turn timed out after 300.0s",
+	}));
+
+	const result = await subagent.execute(
+		"call-timeout-scratch",
+		{ task: "Inspect timeout scratch" },
+		undefined,
+		undefined,
+		context(),
+	);
+
+	assert.equal((await stat(result.details.scratchPath)).isDirectory(), true);
+	const tempEntries = await readdir(testTmpDir);
+	assert.deepEqual(
+		tempEntries.filter((name) => name.startsWith("opensquilla-subagent-")),
+		[result.details.scratchPath.split("/").at(-1)],
+	);
+});
+
+test("chain stops on a timed-out middle step and returns completed steps", async () => {
+	let calls = 0;
+	const { chain } = createHarness(async () => {
+		calls++;
+		if (calls === 1) {
+			return { code: 0, killed: false, stdout: payload({ text: "first" }), stderr: "" };
+		}
+		return {
+			code: 1,
+			killed: false,
+			stdout: "",
+			stderr: "Agent turn timed out after 300.0s",
+		};
+	});
+
+	const result = await chain.execute(
+		"chain-timeout",
+		{ steps: [{ task: "First" }, { task: "Second with {previous}" }, { task: "Third" }] },
+		undefined,
+		undefined,
+		context(),
+	);
+
+	assert.equal(calls, 2);
+	assert.equal(result.details.timedOut, true);
+	assert.equal(result.details.steps.length, 2);
+	assert.equal(result.details.steps[0].status, "ok");
+	assert.equal(result.details.steps[1].status, "timed_out");
+	assert.equal(result.details.steps[1].timedOut, true);
+	assert.ok(Array.isArray(result.details.steps[1].activities));
+	assert.match(result.content[0].text, /timed out at step 2\/3/i);
+	assert.match(result.content[0].text, /step 1: c1 \/ deepseek-v4-pro \(balanced, v4_phase3\)/);
+});
+
+test("non-timeout nonzero exits still throw", async () => {
+	const { subagent } = createHarness(async () => ({
+		code: 1,
+		killed: false,
+		stdout: "",
+		stderr: "some other error",
+	}));
+
+	await assert.rejects(
+		subagent.execute(
+			"call-non-timeout",
+			{ task: "Inspect failure" },
+			undefined,
+			undefined,
+			context(),
+		),
+		(error: Error) => {
+			assert.match(error.message, /some other error/);
+			assert.doesNotMatch(error.message, /timed out/i);
+			return true;
+		},
+	);
+});
+
+test("subagent timeout does not retry automatically", async () => {
+	let calls = 0;
+	const { subagent } = createHarness(async () => {
+		calls++;
+		return {
+			code: 1,
+			killed: false,
+			stdout: "",
+			stderr: "Agent turn timed out after 300.0s",
+		};
+	});
+
+	const result = await subagent.execute(
+		"call-timeout-no-retry",
+		{ task: "Inspect once" },
+		undefined,
+		undefined,
+		context(),
+	);
+	assert.equal(result.details.timedOut, true);
+	assert.equal(calls, 1);
+});
+
 test("chain failures throw and remove the failed turn scratch directory", async () => {
 	let call = 0;
 	const { chain } = createHarness(async () => {

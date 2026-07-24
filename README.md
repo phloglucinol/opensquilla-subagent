@@ -95,6 +95,8 @@ While the subprocess is running, Pi receives periodic updates containing elapsed
 - `details.activities` — recent sanitized file/search activity captured during the run.
 - top-level `usage` — the same usage converted to Pi's accounting format, so nested model cost appears in session totals.
 
+If a subagent times out, the tool returns a structured result with `details.timedOut`, elapsed time, recent activities, and the scratch path, rather than throwing. The parent can narrow scope, synthesize from local reads, or stop. The extension never auto-retries a timed-out prompt.
+
 ### Chain mode
 
 Use a chain only when a later step cannot be specified without an earlier result. Each step is an independent OpenSquilla turn with its own routing; `{previous}` inlines a bounded prior-step handoff.
@@ -111,7 +113,7 @@ opensquilla_chain({
 })
 ```
 
-Returns the final step's text plus `details.steps[]` with each step's routing, effort, activity, and raw usage. The chain reports aggregate usage to Pi. `{previous}` is capped at 12KB/500 lines by default before insertion into the next prompt; it can be raised to 32KB when needed. A failed step throws a tool error that includes completed-step routing and output paths.
+Returns the final step's text plus `details.steps[]` with each step's routing, effort, activity, and raw usage. The chain reports aggregate usage to Pi. `{previous}` is capped at 12KB/500 lines by default before insertion into the next prompt; it can be raised to 32KB when needed. A timed-out step stops the chain and returns completed-step plus timeout details; other failed steps throw a tool error that includes completed-step routing and output paths.
 
 ## Task Sizing
 
