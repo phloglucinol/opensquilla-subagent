@@ -74,8 +74,9 @@ opensquilla_subagent({
 
 While running, the tool parses OpenSquilla's stderr JSONL event stream and
 emits elapsed-time heartbeats, the selected route, the current phase, and up
-to four recent tool names. Thinking text, partial answer text, tool arguments,
-and tool results are not forwarded to Pi.
+to four recent tool calls. Completed calls are matched by `tool_use_id` and
+shown with a `✓`. Thinking text, partial answer text, tool arguments, and tool
+results are not forwarded to Pi.
 
 ## Output and Routing Metadata
 
@@ -87,9 +88,11 @@ full output saved to a temp file) plus `details`:
 - `details.routing.routing_source` — `v4_phase3` for the real ML classifier
 - `details.outputPath` — temp file with the full, untruncated output
 - `details.usage` — raw token accounting from the OpenSquilla turn
-- `details.activities` — recent sanitized route and tool activity from the event stream
+- `details.activities` — recent sanitized route, tool-start, and tool-completion activity from the event stream
 - `details.timedOut` — `true` when a timeout returns elapsed time, recent
-  activities, and `details.scratchPath` instead of throwing; the parent can
+  activities, and `details.scratchPath` instead of throwing; timed-out chain
+  steps also expose `routing: null` and `outputPath` equal to that scratch path;
+  the parent can
   narrow scope, synthesize locally, or stop, and the extension does not retry
   the prompt automatically
 - top-level `usage` — Pi-compatible nested LLM usage for session totals
@@ -139,6 +142,10 @@ opensquilla_chain({
 - `details.steps[]` includes routing, effort, activity, and raw usage.
 - Aggregate nested LLM usage is reported to Pi.
 - Max 10 steps, but prefer 2-4 meaningful phases to avoid repeated startup cost.
+- Isolated profiles are private, synchronously cleaned on normal process exit,
+  and reclaimed after SIGKILL only on a later load when their marker or new
+  PID-bearing name proves the owner is dead. Active and unrecognized legacy
+  profile directories are never swept.
 - Per-step `permissions`/`effort`/`thinking`/`previousMaxBytes`/`timeout`/
   `maxIterations` override chain defaults.
 

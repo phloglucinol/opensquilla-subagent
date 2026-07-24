@@ -983,10 +983,17 @@ test("malformed OpenSquilla output cleans scratch state", async () => {
 	assert.deepEqual(await readdir(testTmpDir), []);
 });
 
-test("stale profile cleanup removes only dead-PID owned directories", async () => {
+test("stale profile cleanup removes only directories proven to have dead owners", async () => {
 	const staleDir = await mkdtemp(join(testTmpDir, "opensquilla-profile-stale-"));
+	const unmarkedStaleDir = await mkdtemp(
+		join(testTmpDir, `opensquilla-profile-${Number.MAX_SAFE_INTEGER}-`),
+	);
 	const liveDir = await mkdtemp(join(testTmpDir, "opensquilla-profile-live-"));
-	const unownedDir = await mkdtemp(join(testTmpDir, "opensquilla-profile-unowned-"));
+	const unmarkedLiveDir = await mkdtemp(join(testTmpDir, `opensquilla-profile-${process.pid}-`));
+	const mismatchedDir = await mkdtemp(
+		join(testTmpDir, `opensquilla-profile-${Number.MAX_SAFE_INTEGER}-`),
+	);
+	const legacyUnownedDir = await mkdtemp(join(testTmpDir, "opensquilla-profile-unowned-"));
 	await writeFile(
 		join(staleDir, ".opensquilla-profile-owner.json"),
 		JSON.stringify({ pid: Number.MAX_SAFE_INTEGER }),
@@ -997,12 +1004,20 @@ test("stale profile cleanup removes only dead-PID owned directories", async () =
 		JSON.stringify({ pid: process.pid }),
 		{ mode: 0o600 },
 	);
+	await writeFile(
+		join(mismatchedDir, ".opensquilla-profile-owner.json"),
+		JSON.stringify({ pid: process.pid }),
+		{ mode: 0o600 },
+	);
 
 	cleanupStaleProfilesSync(testTmpDir);
 
 	await assert.rejects(stat(staleDir), /ENOENT/);
+	await assert.rejects(stat(unmarkedStaleDir), /ENOENT/);
 	assert.equal((await stat(liveDir)).isDirectory(), true);
-	assert.equal((await stat(unownedDir)).isDirectory(), true);
+	assert.equal((await stat(unmarkedLiveDir)).isDirectory(), true);
+	assert.equal((await stat(mismatchedDir)).isDirectory(), true);
+	assert.equal((await stat(legacyUnownedDir)).isDirectory(), true);
 });
 
 test("current-process profile cleanup removes owned and tracked profile directories", async () => {

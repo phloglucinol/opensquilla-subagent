@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is running, with recent activity retained in result details.
 - `effort` presets (`fast`, `balanced`, `deep`) and optional thinking-level
   overrides for single calls and chain steps.
+- Explicit chain resume checkpoints for retrying a timed-out step without
+  rerunning earlier completed steps.
+- GitHub Actions CI runs `npm run check` for every push and pull request.
 
 ### Changed
 
@@ -44,6 +47,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   useful to run in parallel, or helpful for preserving the parent context;
   scouting is conditional, chains require data dependency, and Pi synthesizes
   results by default.
+- Live tool progress now marks completed calls (for example,
+  `read_file ✓ → glob_search`) by matching OpenSquilla `tool_use_id` values.
+- Chain timeout step details now include `routing: null` and an `outputPath`
+  alias for the preserved scratch path, matching successful step fields more
+  closely.
 - Each OpenSquilla turn runs in an isolated profile (a fresh
   `OPENSQUILLA_STATE_DIR` temp directory created per call and removed
   afterwards, including on timeout), so sibling `opensquilla_subagent`
@@ -59,6 +67,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   values in Pi progress updates or result details.
 - Failed and malformed OpenSquilla turns now remove their scratch directories.
 - Persisted output files are created with owner-only permissions.
+- Isolated profiles carry private PID ownership markers, are synchronously
+  removed on normal process exit, and are conservatively reclaimed on the next
+  extension load when a SIGKILL left a dead-process profile behind.
+- Failed OpenSquilla payloads now point users to the isolated profile's source
+  `config.toml` and `.env` when provider configuration is missing.
 
 ## [0.2.1] - 2026-07-23
 

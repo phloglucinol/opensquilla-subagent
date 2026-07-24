@@ -16,7 +16,7 @@ import { spawn as realSpawn } from "node:child_process";
 import { readdirSync, readFileSync, rmSync } from "node:fs";
 import { chmod, copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 import * as readline from "node:readline";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -386,6 +386,14 @@ function readProfileOwner(path: string): { pid: number } | undefined {
 	}
 }
 
+function profileOwnerPid(path: string): number | undefined {
+	const markerPid = readProfileOwner(path)?.pid;
+	const match = basename(path).match(/^opensquilla-profile-(\d+)-/);
+	const namePid = match ? Number(match[1]) : undefined;
+	if (markerPid && namePid && markerPid !== namePid) return undefined;
+	return markerPid ?? (Number.isInteger(namePid) && Number(namePid) > 0 ? namePid : undefined);
+}
+
 function processIsAlive(pid: number): boolean {
 	try {
 		process.kill(pid, 0);
@@ -407,8 +415,8 @@ function scanProfileDirectories(baseDir: string): string[] {
 
 export function cleanupStaleProfilesSync(baseDir = tmpdir()): void {
 	for (const path of scanProfileDirectories(baseDir)) {
-		const owner = readProfileOwner(path);
-		if (!owner || processIsAlive(owner.pid)) continue;
+		const ownerPid = profileOwnerPid(path);
+		if (!ownerPid || processIsAlive(ownerPid)) continue;
 		rmSync(path, { recursive: true, force: true });
 	}
 }
@@ -418,7 +426,7 @@ export function cleanupCurrentProcessProfilesSync(baseDir = tmpdir()): void {
 	for (const path of registry.paths) rmSync(path, { recursive: true, force: true });
 	registry.paths.clear();
 	for (const path of scanProfileDirectories(baseDir)) {
-		if (readProfileOwner(path)?.pid === process.pid) {
+		if (profileOwnerPid(path) === process.pid) {
 			rmSync(path, { recursive: true, force: true });
 		}
 	}

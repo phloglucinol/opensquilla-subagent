@@ -86,7 +86,7 @@ You can also ask in plain language:
 
 ### Progress And Result
 
-While the subprocess is running, Pi reads OpenSquilla's JSONL event stream from stderr and reports elapsed time, the selected route, the current phase, and up to four recent tool names. For example: `Route: c3 / glm-5.2`, `Phase: reasoning`, and `Tools: read_file → glob_search`. Thinking text, partial answer text, tool arguments, and tool results are not forwarded.
+While the subprocess is running, Pi reads OpenSquilla's JSONL event stream from stderr and reports elapsed time, the selected route, the current phase, and up to four recent tool calls. Completed calls are matched by `tool_use_id` and marked in place, for example: `Route: c3 / glm-5.2`, `Phase: reasoning`, and `Tools: read_file ✓ → glob_search`. Thinking text, partial answer text, tool arguments, and tool results are not forwarded.
 
 - `content` — subagent's final text, truncated to Pi's 50KB / 2000-line tool limits. Full output is saved to `details.outputPath` with owner-only permissions.
 - `details.routing` — `{ routed_tier, routed_model, routing_source }` (e.g. `c0` / `deepseek-v4-flash` / `v4_phase3`).
@@ -139,7 +139,7 @@ Delegation is adaptive and parent-orchestrated. Broad prompts tend to route to c
 5. Use `opensquilla_chain` only for genuine data dependency, where a later step consumes an earlier result through `{previous}`. Extracting an API/capability matrix and then checking mismatches is a chain; independent correctness, security, or test reviews are separate calls.
 6. Let the Pi parent synthesize by default. It reads important source files, deduplicates and prioritizes specialist findings, and communicates the result. Do not add a final `fast` synthesis subagent unless the material is too large or specialized for reliable parent synthesis.
 
-Independent calls may be emitted as sibling tool calls in one Pi response, while chain steps are explicitly data-dependent turns inside one tool call. Each call spins up an isolated OpenSquilla profile (a fresh `OPENSQUILLA_STATE_DIR` temp directory created per call and removed afterwards, including on timeout), so sibling calls in one Pi response run concurrently without profile-lock collisions. Chain steps remain sequential because each step consumes the prior step's output through `{previous}` — that is chain semantics, not a profile-lock limitation.
+Independent calls may be emitted as sibling tool calls in one Pi response, while chain steps are explicitly data-dependent turns inside one tool call. Each call spins up an isolated OpenSquilla profile (a fresh `OPENSQUILLA_STATE_DIR` temp directory created per call and removed afterwards, including on timeout), so sibling calls in one Pi response run concurrently without profile-lock collisions. The profile directory is `0700`; copied config, dotenv, and ownership marker files are `0600`. Normal process exit performs synchronous cleanup. Because SIGKILL cannot run any Node hook, the next extension load conservatively removes only profile directories whose marker or new PID-bearing name proves that the owner is no longer alive; active directories and unrecognized legacy directories are left untouched. Chain steps remain sequential because each step consumes the prior step's output through `{previous}` — that is chain semantics, not a profile-lock limitation.
 
 Keep chains to two to four meaningful steps with concise handoffs. Very small steps are inefficient because each repeats OpenSquilla startup and routing.
 
@@ -174,7 +174,7 @@ OpenSquilla 0.5.0rc4 accepts the task only through `--message`, so the extension
 
 OpenSquilla's sandbox currently maintains `.opensquilla-cache/` worker payloads inside the workspace even in `restricted` mode. This is runtime state rather than an agent-authored project edit, but it should be ignored by version control. The package's own `.gitignore` includes it; add the same rule in consuming repositories when needed.
 
-Live status depends on OpenSquilla emitting `--event-stream-stderr` events. Heartbeats continue when no new event arrives, and a reasoning phase reports how long it has been idle.
+Live status depends on OpenSquilla emitting `--event-stream-stderr` events. Heartbeats continue when no new event arrives, and a reasoning phase reports how long it has been idle. If OpenSquilla returns a failed JSON payload, the error includes a reminder to verify the source profile's `~/.opensquilla/config.toml` and `~/.opensquilla/.env` provider configuration.
 
 ## License
 
