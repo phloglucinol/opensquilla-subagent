@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import registerExtension from "../src/extension/index.ts";
+import registerExtension, {
+	_setSpawnFn,
+	spawnOpenSquilla,
+	type SpawnResult,
+} from "../src/extension/index.ts";
 
 interface RegisteredTool {
 	name: string;
@@ -24,6 +28,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+	_setSpawnFn(spawnOpenSquilla);
 	if (originalTmpDir === undefined) delete process.env.TMPDIR;
 	else process.env.TMPDIR = originalTmpDir;
 	await rm(testTmpDir, { recursive: true, force: true });
@@ -53,17 +58,52 @@ function payload(overrides: Record<string, unknown> = {}): string {
 	});
 }
 
+interface FakeSpawnResult {
+	stdout: string;
+	stderrLines?: string[];
+	stderr?: string;
+	code: number;
+	killed?: boolean;
+}
+
+interface SpawnOptions {
+	cwd: string;
+	signal?: AbortSignal;
+	timeout?: number;
+	onStderrLine?: (line: string) => boolean | void;
+}
+
 function createHarness(
-	exec: (command: string, args: string[], options?: Record<string, unknown>) => Promise<any>,
+	mockSpawn: (
+		command: string,
+		args: string[],
+		options: SpawnOptions,
+	) => FakeSpawnResult | Promise<FakeSpawnResult>,
 ) {
 	const tools = new Map<string, RegisteredTool>();
 	const pi = {
 		registerTool(tool: RegisteredTool) {
 			tools.set(tool.name, tool);
 		},
-		exec,
+		async exec() {
+			throw new Error("should not call pi.exec");
+		},
 	} as unknown as ExtensionAPI;
 	registerExtension(pi);
+	_setSpawnFn(async (command, args, options): Promise<SpawnResult> => {
+		const mock = await mockSpawn(command, args, options);
+		const lines = mock.stderrLines ?? mock.stderr?.split(/\r?\n/).filter(Boolean) ?? [];
+		const unhandled: string[] = [];
+		for (const line of lines) {
+			if (options.onStderrLine?.(line) !== true) unhandled.push(line);
+		}
+		return {
+			stdout: mock.stdout,
+			stderr: unhandled.length > 0 ? `${unhandled.join("\n")}\n` : "",
+			code: mock.code,
+			killed: mock.killed ?? false,
+		};
+	});
 	return {
 		subagent: tools.get("opensquilla_subagent")!,
 		chain: tools.get("opensquilla_chain")!,
@@ -85,6 +125,48 @@ function argValue(args: string[], flag: string): string | undefined {
 	const index = args.indexOf(flag);
 	return index === -1 ? undefined : args[index + 1];
 }
+
+test("spawnOpenSquilla streams stderr lines and retains only unhandled stderr", async () => {
+	const received: string[] = [];
+	const event = JSON.stringify({ _event: true, kind: "thinking" });
+	const script = [
+		"process.stdout.write('result')",
+		`process.stderr.write(${JSON.stringify(event.slice(0, 12))})`,
+		`process.stderr.write(${JSON.stringify(`${event.slice(12)}\nplain diagnostic`)})`,
+	].join(";");
+
+	const result = await spawnOpenSquilla(process.execPath, ["-e", script], {
+		cwd: process.cwd(),
+		onStderrLine: (line) => {
+			received.push(line);
+			return line.startsWith("{");
+		},
+	});
+
+	assert.equal(result.code, 0);
+	assert.equal(result.killed, false);
+	assert.equal(result.stdout, "result");
+	assert.deepEqual(received, [event, "plain diagnostic"]);
+	assert.equal(result.stderr, "plain diagnostic\n");
+});
+
+test("spawnOpenSquilla terminates on timeout and AbortSignal", async () => {
+	const script = "setInterval(() => {}, 1000)";
+	const timedOut = await spawnOpenSquilla(process.execPath, ["-e", script], {
+		cwd: process.cwd(),
+		timeout: 25,
+	});
+	assert.equal(timedOut.killed, true);
+
+	const controller = new AbortController();
+	const abortedPromise = spawnOpenSquilla(process.execPath, ["-e", script], {
+		cwd: process.cwd(),
+		signal: controller.signal,
+	});
+	setTimeout(() => controller.abort(), 25);
+	const aborted = await abortedPromise;
+	assert.equal(aborted.killed, true);
+});
 
 test("schemas make documented defaults optional and reject extra properties", () => {
 	const { subagent, chain } = createHarness(async () => {
@@ -137,7 +219,7 @@ test("tool guidance encodes adaptive parent-orchestrated delegation", () => {
 });
 
 test("single delegation applies defaults, persists output, and reports Pi usage", async () => {
-	let invocation: { command: string; args: string[]; options?: Record<string, unknown> } | undefined;
+	let invocation: { command: string; args: string[]; options?: SpawnOptions } | undefined;
 	const { subagent } = createHarness(async (command, args, options) => {
 		invocation = { command, args, options };
 		return { code: 0, killed: false, stdout: payload(), stderr: "" };
@@ -149,6 +231,8 @@ test("single delegation applies defaults, persists output, and reports Pi usage"
 	assert.equal(argValue(invocation!.args, "--timeout"), "300");
 	assert.equal(argValue(invocation!.args, "--max-iterations"), "8");
 	assert.equal(argValue(invocation!.args, "--max-provider-retries"), "2");
+	assert.equal(invocation!.args.includes("--event-stream-stderr"), true);
+	assert.ok(invocation!.args.indexOf("--event-stream-stderr") < invocation!.args.indexOf("--message"));
 	assert.equal(invocation!.args.includes("--thinking"), false);
 	assert.equal(invocation!.args.includes("--workspace-lockdown"), false);
 	assert.equal(invocation?.options?.timeout, 315_000);
@@ -474,88 +558,101 @@ test("oversized tasks fail clearly before spawning a process or creating scratch
 	assert.deepEqual(await readdir(testTmpDir), []);
 });
 
-test("progress updates expose recent OpenSquilla file activity", async () => {
-	const workspace = join(testTmpDir, "workspace");
-	const workerDir = join(workspace, ".opensquilla-cache", "fs-worker");
-	await mkdir(workspace, { recursive: true });
+test("event stream reports route, phase, tools, and result activities", async () => {
 	const updates: string[] = [];
-	const sensitiveValues = ["sk-live-SUPER_SECRET", "*.private.json"];
-	const { subagent } = createHarness(async () => {
-		await new Promise((resolve) => setTimeout(resolve, 100));
-		await mkdir(workerDir, { recursive: true });
-		await writeFile(
-			join(workerDir, "activity-read.json"),
-			JSON.stringify({
-				kind: "read_file",
-				displayPath: join(workspace, "src", "live.ts"),
-				path: join(workspace, "src", "live.ts"),
-			}),
-			"utf8",
-		);
-		await writeFile(
-			join(workerDir, "activity-search.json"),
-			JSON.stringify({
-				kind: "glob_search",
-				pattern: sensitiveValues[0],
-				include: sensitiveValues[1],
-				root: join(workspace, "src"),
-			}),
-			"utf8",
-		);
-		await new Promise((resolve) => setTimeout(resolve, 800));
-		return { code: 0, killed: false, stdout: payload(), stderr: "" };
-	});
+	const events = [
+		JSON.stringify({
+			_event: true,
+			kind: "router_decision",
+			tier: "c3",
+			model: "glm-5.2",
+		}),
+		JSON.stringify({ _event: true, kind: "thinking", text: "private reasoning" }),
+		JSON.stringify({ _event: true, kind: "tool_use_start", tool_name: "read_file" }),
+		JSON.stringify({ _event: true, kind: "tool_result", tool_name: "read_file" }),
+		JSON.stringify({ _event: true, kind: "tool_use_start", tool_name: "glob_search" }),
+	];
+	const { subagent } = createHarness(async () => ({
+		code: 0,
+		stdout: payload(),
+		stderrLines: events,
+	}));
 
 	const result = await subagent.execute(
 		"call-progress",
 		{ task: "Inspect live.ts", effort: "fast" },
 		undefined,
 		(partial: any) => updates.push(partial.content[0]?.text ?? ""),
-		context({ cwd: workspace }),
+		context(),
 	);
+
 	assert.ok(updates.some((text) => text.includes("OpenSquilla subagent (fast) running")));
-	assert.ok(updates.some((text) => text.includes("read src/live.ts")));
-	assert.ok(updates.some((text) => text.includes("search in src")));
-	assert.deepEqual(result.details.activities, ["read src/live.ts", "search in src"]);
-	for (const sensitiveValue of sensitiveValues) {
-		assert.ok(updates.every((text) => !text.includes(sensitiveValue)));
-		assert.ok(result.details.activities.every((activity: string) => !activity.includes(sensitiveValue)));
-	}
+	assert.ok(updates.some((text) => text.includes("Route: c3 / glm-5.2")));
+	assert.ok(updates.some((text) => text.includes("Phase: reasoning")));
+	assert.ok(updates.some((text) => text.includes("Phase: tool_calling")));
+	assert.ok(updates.some((text) => text.includes("Tools: read_file → glob_search")));
+	assert.ok(updates.every((text) => !text.includes("private reasoning")));
+	assert.deepEqual(result.details.activities, [
+		"routed c3 / glm-5.2",
+		"tool read_file",
+		"tool glob_search",
+	]);
+	assert.deepEqual(result.details.routing, {
+		routed_tier: "c1",
+		routed_model: "deepseek-v4-pro",
+		routing_source: "v4_phase3",
+	});
 });
 
-test("progress updates sanitize include-only glob search activity", async () => {
-	const workspace = join(testTmpDir, "workspace");
-	const workerDir = join(workspace, ".opensquilla-cache", "fs-worker");
-	const sensitiveInclude = "*.private.json";
-	await mkdir(workspace, { recursive: true });
+test("non-event stderr is ignored by progress and retained for failures", async () => {
 	const updates: string[] = [];
-	const { subagent } = createHarness(async () => {
-		await new Promise((resolve) => setTimeout(resolve, 100));
-		await mkdir(workerDir, { recursive: true });
-		await writeFile(
-			join(workerDir, "activity-search.json"),
-			JSON.stringify({
-				kind: "glob_search",
-				include: sensitiveInclude,
-				root: join(workspace, "src"),
-			}),
-			"utf8",
-		);
-		await new Promise((resolve) => setTimeout(resolve, 800));
-		return { code: 0, killed: false, stdout: payload(), stderr: "" };
-	});
+	const { subagent } = createHarness(async () => ({
+		code: 2,
+		stdout: "",
+		stderrLines: [
+			"provider diagnostic text",
+			"not-json",
+			JSON.stringify({ _event: false, kind: "thinking" }),
+			JSON.stringify({ _event: true, kind: "router_decision", tier: "c1", model: "model-a" }),
+		],
+	}));
+
+	await assert.rejects(
+		subagent.execute(
+			"call-mixed-stderr",
+			{ task: "Inspect failure" },
+			undefined,
+			(partial: any) => updates.push(partial.content[0]?.text ?? ""),
+			context(),
+		),
+		/provider diagnostic text/,
+	);
+	assert.ok(updates.some((text) => text.includes("Route: c1 / model-a")));
+	assert.ok(updates.every((text) => !text.includes("provider diagnostic text")));
+	assert.ok(updates.every((text) => !text.includes("not-json")));
+});
+
+test("timeout returns event-stream activities", async () => {
+	const { subagent } = createHarness(async () => ({
+		code: 1,
+		killed: true,
+		stdout: "",
+		stderrLines: [
+			JSON.stringify({ _event: true, kind: "router_decision", tier: "c2", model: "kimi-code" }),
+			JSON.stringify({ _event: true, kind: "tool_use_start", tool_name: "read_file" }),
+		],
+	}));
 
 	const result = await subagent.execute(
-		"call-progress-include-only",
-		{ task: "Inspect private JSON files", effort: "fast" },
+		"call-event-timeout",
+		{ task: "Inspect timeout" },
 		undefined,
-		(partial: any) => updates.push(partial.content[0]?.text ?? ""),
-		context({ cwd: workspace }),
+		undefined,
+		context(),
 	);
-	assert.ok(updates.some((text) => text.includes("search in src")));
-	assert.deepEqual(result.details.activities, ["search in src"]);
-	assert.ok(updates.every((text) => !text.includes(sensitiveInclude)));
-	assert.ok(result.details.activities.every((activity: string) => !activity.includes(sensitiveInclude)));
+	assert.equal(result.details.timedOut, true);
+	assert.deepEqual(result.details.activities, ["routed c2 / kimi-code", "tool read_file"]);
+	assert.match(result.content[0].text, /routed c2 \/ kimi-code, tool read_file/);
 });
 
 test("profile lock conflicts return a concise actionable error", async () => {

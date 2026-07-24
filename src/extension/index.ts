@@ -12,9 +12,11 @@
  * internally; Pi receives sanitized activity updates plus the final result.
  */
 
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { spawn as realSpawn } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join } from "node:path";
+import * as readline from "node:readline";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
 	DEFAULT_MAX_BYTES,
@@ -37,7 +39,6 @@ const DEFAULT_CHAIN_PREVIOUS_BYTES = 12 * 1024;
 const MAX_CHAIN_PREVIOUS_BYTES = 32 * 1024;
 const MIN_CHAIN_PREVIOUS_BYTES = 1024;
 const CHAIN_PREVIOUS_MAX_LINES = 500;
-const PROGRESS_POLL_MS = 750;
 const PROGRESS_HEARTBEAT_MS = 3000;
 
 const PERMS_DESC =
@@ -80,19 +81,6 @@ interface ResolvedRunOptions {
 	providerRetries: number;
 }
 
-interface WorkerActivityPayload {
-	kind?: unknown;
-	displayPath?: unknown;
-	path?: unknown;
-	root?: unknown;
-	pattern?: unknown;
-	include?: unknown;
-}
-
-interface ActivityMonitor {
-	stop(): Promise<string[]>;
-}
-
 interface RunTurnSuccess {
 	timedOut: false;
 	payload: Payload;
@@ -109,6 +97,102 @@ interface RunTurnTimeout {
 }
 
 type RunTurnResult = RunTurnSuccess | RunTurnTimeout;
+
+export interface SpawnResult {
+	stdout: string;
+	stderr: string;
+	code: number;
+	killed: boolean;
+}
+
+type StderrLineCb = (line: string) => boolean | void;
+
+interface EventStreamState {
+	route: string | null;
+	phase: string;
+	tools: string[];
+	lastEventAt: number;
+	activities: string[];
+}
+
+/** Spawn OpenSquilla and stream stderr one line at a time. */
+export async function spawnOpenSquilla(
+	command: string,
+	args: string[],
+	options: {
+		cwd: string;
+		signal?: AbortSignal;
+		timeout?: number;
+		onStderrLine?: StderrLineCb;
+	},
+): Promise<SpawnResult> {
+	return new Promise((resolve) => {
+		const proc = realSpawn(command, args, {
+			cwd: options.cwd,
+			shell: false,
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		let stdout = "";
+		let stderr = "";
+		let killed = false;
+		let settled = false;
+		let timeoutId: NodeJS.Timeout | undefined;
+		let forceKillId: NodeJS.Timeout | undefined;
+
+		const killProcess = () => {
+			if (killed) return;
+			killed = true;
+			proc.kill("SIGTERM");
+			forceKillId = setTimeout(() => {
+				if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+			}, 5000);
+			forceKillId.unref();
+		};
+
+		const finish = (code: number) => {
+			if (settled) return;
+			settled = true;
+			if (timeoutId) clearTimeout(timeoutId);
+			if (forceKillId) clearTimeout(forceKillId);
+			options.signal?.removeEventListener("abort", killProcess);
+			resolve({ stdout, stderr, code, killed });
+		};
+
+		if (options.signal) {
+			if (options.signal.aborted) killProcess();
+			else options.signal.addEventListener("abort", killProcess, { once: true });
+		}
+		if (options.timeout && options.timeout > 0) {
+			timeoutId = setTimeout(killProcess, options.timeout);
+		}
+
+		proc.stdout.setEncoding("utf8");
+		proc.stdout.on("data", (data: string) => {
+			stdout += data;
+		});
+
+		const stderrLines = readline.createInterface({ input: proc.stderr });
+		stderrLines.on("line", (line) => {
+			let handled = false;
+			try {
+				handled = options.onStderrLine?.(line) === true;
+			} catch {
+				// A progress callback must not interfere with process collection.
+			}
+			if (!handled) stderr += `${line}\n`;
+		});
+
+		proc.on("close", (code) => finish(code ?? 0));
+		proc.on("error", () => finish(1));
+	});
+}
+
+let _spawnOpenSquilla: typeof spawnOpenSquilla = spawnOpenSquilla;
+
+/** @internal Test override for the spawn function. */
+export function _setSpawnFn(fn: typeof spawnOpenSquilla): void {
+	_spawnOpenSquilla = fn;
+}
 
 const EFFORT_DEFAULTS: Record<
 	Effort,
@@ -252,118 +336,88 @@ function composeChainTask(
 	return task;
 }
 
-function shortWorkspacePath(cwd: string, value: unknown): string {
-	if (typeof value !== "string" || !value) return ".";
-	const rel = relative(cwd, value);
-	const display = rel === "" ? "." : rel.startsWith("..") ? value : rel;
-	return display.length > 120 ? `...${display.slice(-117)}` : display;
-}
-
-function formatWorkerActivity(cwd: string, payload: WorkerActivityPayload): string | undefined {
-	if (typeof payload.kind !== "string") return undefined;
-	const target = shortWorkspacePath(cwd, payload.displayPath ?? payload.path ?? payload.root);
-	switch (payload.kind) {
-		case "read_file":
-			return `read ${target}`;
-		case "list_dir":
-			return `list ${target}`;
-		case "glob_search":
-			return `search in ${target}`;
-		case "write_file":
-		case "write":
-			return `write ${target}`;
-		case "edit_file":
-		case "edit":
-			return `edit ${target}`;
-		case "shell":
-		case "run_shell":
-		case "execute":
-			return `run shell in ${target}`;
-		default:
-			return `${payload.kind.replaceAll("_", " ")} ${target}`;
-	}
-}
-
-async function startActivityMonitor(input: {
-	cwd: string;
-	label: string;
-	perms: string;
-	onProgress?: ProgressCb;
-}): Promise<ActivityMonitor> {
-	if (!input.onProgress) return { async stop() { return []; } };
-
-	const workerDir = join(input.cwd, ".opensquilla-cache", "fs-worker");
-	const initialNames = await readdir(workerDir).catch(() => [] as string[]);
-	const seen = new Set(initialNames);
-	const activities: string[] = [];
-	const startedAt = Date.now();
-	let lastEmitAt = 0;
-	let polling = false;
-
-	const emit = (force = false) => {
-		const now = Date.now();
-		if (!force && now - lastEmitAt < PROGRESS_HEARTBEAT_MS) return;
-		lastEmitAt = now;
-		const elapsed = Math.max(0, Math.round((now - startedAt) / 1000));
-		const recent = activities.slice(-4);
-		const status =
-			recent.length > 0
-				? `Recent activity:\n${recent.map((activity) => `- ${activity}`).join("\n")}`
-				: elapsed < 8
-					? "Starting runtime and selecting a model route..."
-					: "Waiting for the model response or its next tool call...";
-		input.onProgress?.(
-			`${input.label} running ${elapsed}s (permissions=${input.perms})\n${status}`,
-		);
-	};
-
-	const poll = async (forceEmit = false) => {
-		if (polling) return;
-		polling = true;
-		let changed = false;
-		try {
-			const names = await readdir(workerDir).catch(() => [] as string[]);
-			for (const name of names.sort()) {
-				if (seen.has(name) || !name.endsWith(".json")) continue;
-				try {
-					const raw = await readFile(join(workerDir, name), "utf8");
-					const activity = formatWorkerActivity(
-						input.cwd,
-						JSON.parse(raw) as WorkerActivityPayload,
-					);
-					seen.add(name);
-					if (activity && activity !== activities.at(-1)) {
-						activities.push(activity);
-						if (activities.length > 20) activities.shift();
-						changed = true;
-					}
-				} catch {
-					// The worker may still be writing this JSON file; retry on the next poll.
-				}
-			}
-		} finally {
-			polling = false;
-		}
-		if (changed) emit(true);
-		else emit(forceEmit);
-	};
-
-	emit(true);
-	const interval = setInterval(() => void poll(), PROGRESS_POLL_MS);
-	interval.unref();
-
+function createEventStreamState(): EventStreamState {
 	return {
-		async stop() {
-			clearInterval(interval);
-			await poll(true);
-			return [...activities];
-		},
+		route: null,
+		phase: "starting",
+		tools: [],
+		lastEventAt: Date.now(),
+		activities: [],
 	};
+}
+
+function addEventActivity(state: EventStreamState, activity: string): void {
+	state.activities.push(activity);
+	if (state.activities.length > 20) state.activities.shift();
+}
+
+function processEventLine(line: string, state: EventStreamState): boolean {
+	let parsed: Record<string, unknown>;
+	try {
+		parsed = JSON.parse(line) as Record<string, unknown>;
+	} catch {
+		return false;
+	}
+	if (parsed._event !== true) return false;
+
+	state.lastEventAt = Date.now();
+	switch (parsed.kind) {
+		case "router_decision":
+			if (typeof parsed.tier === "string" && typeof parsed.model === "string") {
+				state.route = `${parsed.tier} / ${parsed.model}`;
+				addEventActivity(state, `routed ${state.route}`);
+			}
+			break;
+		case "state_change":
+			if (typeof parsed.to_state === "string") state.phase = parsed.to_state;
+			break;
+		case "thinking":
+			state.phase = "reasoning";
+			break;
+		case "tool_use_start":
+			if (typeof parsed.tool_name === "string") {
+				state.tools.push(parsed.tool_name);
+				if (state.tools.length > 20) state.tools.shift();
+				addEventActivity(state, `tool ${parsed.tool_name}`);
+				state.phase = "tool_calling";
+			}
+			break;
+		case "tool_result":
+			state.phase = "tool_calling";
+			break;
+		case "text_delta":
+			state.phase = "streaming";
+			break;
+		case "done":
+			state.phase = "done";
+			break;
+	}
+	return true;
+}
+
+function formatProgressMessage(
+	label: string,
+	perms: string,
+	startedAt: number,
+	state: EventStreamState,
+): string {
+	const elapsed = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+	const lines = [`${label} running ${elapsed}s (permissions=${perms})`];
+	if (state.route) lines.push(`Route: ${state.route}`);
+
+	const idleSec = Math.max(0, Math.round((Date.now() - state.lastEventAt) / 1000));
+	if (state.phase === "reasoning" && idleSec > 5) {
+		lines.push(`Phase: reasoning (${idleSec}s since last event)`);
+	} else if (state.phase !== "starting") {
+		lines.push(`Phase: ${state.phase}`);
+	}
+	const recentTools = state.tools.slice(-4);
+	if (recentTools.length > 0) lines.push(`Tools: ${recentTools.join(" → ")}`);
+	return lines.join("\n");
 }
 
 /** Run one `opensquilla agent --json` turn. Throws on non-timeout failures. */
 async function runTurn(
-	pi: ExtensionAPI,
 	input: {
 		task: string;
 		perms: string;
@@ -402,6 +456,7 @@ async function runTurn(
 			String(input.maxIter),
 			"--max-provider-retries",
 			String(input.providerRetries),
+			"--event-stream-stderr",
 			"--message",
 			input.task,
 		];
@@ -410,19 +465,31 @@ async function runTurn(
 			args.push("--workspace-lockdown");
 		}
 
-		const monitor = await startActivityMonitor({
-			cwd: input.cwd,
-			label: input.progressLabel,
-			perms: input.perms,
-			onProgress: input.onProgress,
-		});
-		let activities: string[] = [];
+		const state = createEventStreamState();
+		const emitProgress = () => {
+			input.onProgress?.(
+				formatProgressMessage(input.progressLabel, input.perms, startedAt, state),
+			);
+		};
+		emitProgress();
+		const heartbeat = setInterval(emitProgress, PROGRESS_HEARTBEAT_MS);
+		heartbeat.unref();
+
 		let result;
 		try {
-			result = await pi.exec(OPENSQUILLA_BIN, args, {
+			result = await _spawnOpenSquilla(OPENSQUILLA_BIN, args, {
 				cwd: input.cwd,
 				signal: input.signal,
 				timeout: (input.timeout + 15) * 1000,
+				onStderrLine: (line) => {
+					const previous = `${state.route}\0${state.phase}\0${state.tools.join("\0")}`;
+					const handled = processEventLine(line, state);
+					if (handled) {
+						const current = `${state.route}\0${state.phase}\0${state.tools.join("\0")}`;
+						if (current !== previous) emitProgress();
+					}
+					return handled;
+				},
 			});
 		} catch (err) {
 			if (input.signal?.aborted) throw new Error("OpenSquilla subagent aborted");
@@ -430,14 +497,16 @@ async function runTurn(
 				`failed to run opensquilla: ${err instanceof Error ? err.message : String(err)}`,
 			);
 		} finally {
-			activities = await monitor.stop();
+			clearInterval(heartbeat);
 		}
 		if (input.signal?.aborted) throw new Error("OpenSquilla subagent aborted");
+		const activities = state.activities;
 		const detail = result.stderr.trim() || result.stdout.trim();
 		const isTimeout = result.killed || /timed out after/i.test(detail);
 		if (isTimeout) {
 			const elapsedSeconds = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
-			const recentActivities = activities.slice(-8);
+			const recentActivities =
+				activities.length > 0 ? activities.slice(-8) : state.tools.slice(-8).map((tool) => `tool ${tool}`);
 			const activitySummary =
 				recentActivities.length > 0
 					? recentActivities.join(", ")
@@ -606,7 +675,7 @@ export default function (pi: ExtensionAPI) {
 			const onProgress: ProgressCb = (t) =>
 				onUpdate?.({ content: [{ type: "text", text: t }], details: undefined });
 
-			const turn = await runTurn(pi, {
+			const turn = await runTurn({
 				task: params.task,
 				perms,
 				timeout: options.timeout,
@@ -843,7 +912,7 @@ export default function (pi: ExtensionAPI) {
 
 				let turn;
 				try {
-					turn = await runTurn(pi, {
+					turn = await runTurn({
 						task,
 						perms,
 						timeout: options.timeout,

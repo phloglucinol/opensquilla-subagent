@@ -67,11 +67,10 @@ opensquilla_subagent({
 
 ## Live Progress
 
-While running, the tool emits elapsed-time heartbeats and up to four recent
-sanitized activities such as `read src/auth.ts`, `list tests`, or
-`search in src`. Search patterns and queries are not exposed to Pi. These come
-from OpenSquilla's fs-worker cache. Pi does not receive model reasoning or
-partial answer text.
+While running, the tool parses OpenSquilla's stderr JSONL event stream and
+emits elapsed-time heartbeats, the selected route, the current phase, and up
+to four recent tool names. Thinking text, partial answer text, tool arguments,
+and tool results are not forwarded to Pi.
 
 ## Output and Routing Metadata
 
@@ -83,7 +82,7 @@ full output saved to a temp file) plus `details`:
 - `details.routing.routing_source` — `v4_phase3` for the real ML classifier
 - `details.outputPath` — temp file with the full, untruncated output
 - `details.usage` — raw token accounting from the OpenSquilla turn
-- `details.activities` — recent sanitized activity captured during the run
+- `details.activities` — recent sanitized route and tool activity from the event stream
 - `details.timedOut` — `true` when a timeout returns elapsed time, recent
   activities, and `details.scratchPath` instead of throwing; the parent can
   narrow scope, synthesize locally, or stop, and the extension does not retry

@@ -2,7 +2,7 @@
 
 Pi extension that delegates a task to an isolated [OpenSquilla](https://github.com/opensquilla/opensquilla) agent with its own **SquillaRouter** model routing.
 
-Each call runs `opensquilla agent --json` as a subprocess. OpenSquilla handles provider auth, tool dispatch, context management, and per-turn model tier routing (c0–c3) internally. Pi receives sanitized live activity plus the final text, usage, and routing metadata.
+Each call runs `opensquilla agent --json --event-stream-stderr` as a subprocess. OpenSquilla handles provider auth, tool dispatch, context management, and per-turn model tier routing (c0–c3) internally. Pi receives sanitized live event status plus the final text, usage, and routing metadata.
 
 ```
 Pi → opensquilla_subagent tool → opensquilla agent --json
@@ -19,12 +19,11 @@ Pi → opensquilla_subagent tool → opensquilla agent --json
 ## Prerequisites
 
 1. **Pi** `>= 0.81` — `npm install -g @earendil-works/pi-coding-agent`
-2. **OpenSquilla** `0.5.0rc4` with `recommended` profile (includes SquillaRouter dependencies and V4.2 Phase 3 model assets):
+2. **OpenSquilla** with `--event-stream-stderr` support and the `recommended` profile (including SquillaRouter dependencies and V4.2 Phase 3 model assets). Install a compatible OpenSquilla build, configure the router, and verify the event-stream option:
 
    ```sh
-   uv tool install --python 3.12 --force \
-     "opensquilla[recommended] @ https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc4/opensquilla-0.5.0rc4-py3-none-any.whl"
    opensquilla onboard configure router --router recommended
+   opensquilla agent --help 2>&1 | grep event-stream-stderr
    ```
 
 3. **A provider API key** for OpenSquilla (it does not share Pi's OAuth subscription). For example, TokenRhythm:
@@ -87,12 +86,12 @@ You can also ask in plain language:
 
 ### Progress And Result
 
-While the subprocess is running, Pi receives periodic updates containing elapsed time and up to four recent activities such as `read src/auth.ts`, `list tests`, or `search in src`. Search patterns and queries are not exposed to Pi. This is best-effort metadata from OpenSquilla's fs-worker cache; model reasoning and partial answer text remain private until the turn completes.
+While the subprocess is running, Pi reads OpenSquilla's JSONL event stream from stderr and reports elapsed time, the selected route, the current phase, and up to four recent tool names. For example: `Route: c3 / glm-5.2`, `Phase: reasoning`, and `Tools: read_file → glob_search`. Thinking text, partial answer text, tool arguments, and tool results are not forwarded.
 
 - `content` — subagent's final text, truncated to Pi's 50KB / 2000-line tool limits. Full output is saved to `details.outputPath` with owner-only permissions.
 - `details.routing` — `{ routed_tier, routed_model, routing_source }` (e.g. `c0` / `deepseek-v4-flash` / `v4_phase3`).
 - `details.usage` — raw token accounting from the OpenSquilla turn.
-- `details.activities` — recent sanitized file/search activity captured during the run.
+- `details.activities` — recent sanitized routing and tool-start activity derived from the event stream.
 - top-level `usage` — the same usage converted to Pi's accounting format, so nested model cost appears in session totals.
 
 If a subagent times out, the tool returns a structured result with `details.timedOut`, elapsed time, recent activities, and the scratch path, rather than throwing. The parent can narrow scope, synthesize from local reads, or stop. The extension never auto-retries a timed-out prompt.
@@ -147,13 +146,13 @@ To use a different provider (OpenRouter, OpenAI, Anthropic, …), set `[llm]` an
 ## How It Works
 
 1. Pi calls `opensquilla_subagent({ task, ... })`.
-2. The extension starts a sanitized activity monitor, then spawns `opensquilla agent --json --workspace <cwd> --workspace-strict --scratch-dir <tmp> --permissions <p> --stateless-keep-project-rules --no-memory-capture ...`.
-3. The monitor reports elapsed time and newly observed fs-worker operations while OpenSquilla runs its pre-turn pipeline. The `apply_squilla_router` step scores the prompt and picks a tier.
+2. The extension spawns `opensquilla agent --json --event-stream-stderr --workspace <cwd> --workspace-strict --scratch-dir <tmp> --permissions <p> --stateless-keep-project-rules --no-memory-capture ...`.
+3. The extension parses JSONL events from stderr and reports elapsed time, route, phase, and recent tool names while OpenSquilla runs. The `apply_squilla_router` step scores the prompt and picks a tier.
 4. The tier's model answers the task using OpenSquilla's own tool surface.
 5. OpenSquilla emits a JSON payload (`{ status, text, usage, routing, errors }`).
 6. The extension parses it, truncates, persists full output to a temp file, and returns it to Pi.
 
-Routing happens inside OpenSquilla. Pi sees best-effort sanitized activity updates, but not model reasoning, partial answer text, exact tool payloads, or session state. The final text, usage, and routing metadata arrive when the subprocess completes.
+Routing happens inside OpenSquilla. Pi sees event-derived status, but not model reasoning text, partial answer text, exact tool payloads, or session state. The final text, usage, and routing metadata arrive when the subprocess completes.
 
 ## Limits
 
@@ -161,7 +160,7 @@ OpenSquilla 0.5.0rc4 accepts the task only through `--message`, so the extension
 
 OpenSquilla's sandbox currently maintains `.opensquilla-cache/` worker payloads inside the workspace even in `restricted` mode. This is runtime state rather than an agent-authored project edit, but it should be ignored by version control. The package's own `.gitignore` includes it; add the same rule in consuming repositories when needed.
 
-Live activity is best effort. If another OpenSquilla process writes to the same workspace cache concurrently, activity records cannot be perfectly attributed; the profile lock normally prevents this for one profile.
+Live status depends on OpenSquilla emitting `--event-stream-stderr` events. Heartbeats continue when no new event arrives, and a reasoning phase reports how long it has been idle.
 
 ## License
 
