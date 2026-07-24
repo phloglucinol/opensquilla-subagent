@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import registerExtension, {
 	_setSpawnFn,
+	cleanupCurrentProcessProfilesSync,
+	cleanupStaleProfilesSync,
 	spawnOpenSquilla,
 	type SpawnResult,
 } from "../src/extension/index.ts";
@@ -481,6 +483,8 @@ test("chain stops on a timed-out middle step and returns completed steps", async
 	assert.equal(result.details.steps[0].status, "ok");
 	assert.equal(result.details.steps[1].status, "timed_out");
 	assert.equal(result.details.steps[1].timedOut, true);
+	assert.equal(result.details.steps[1].routing, null);
+	assert.equal(result.details.steps[1].outputPath, result.details.steps[1].scratchPath);
 	assert.ok(Array.isArray(result.details.steps[1].activities));
 	assert.match(result.content[0].text, /timed out at step 2\/3/i);
 	assert.match(result.content[0].text, /step 1: c1 \/ deepseek-v4-pro \(balanced, v4_phase3\)/);
@@ -613,11 +617,12 @@ test("event stream reports route, phase, tools, and result activities", async ()
 	assert.ok(updates.some((text) => text.includes("Route: c3 / glm-5.2")));
 	assert.ok(updates.some((text) => text.includes("Phase: reasoning")));
 	assert.ok(updates.some((text) => text.includes("Phase: tool_calling")));
-	assert.ok(updates.some((text) => text.includes("Tools: read_file → glob_search")));
+	assert.ok(updates.some((text) => text.includes("Tools: read_file ✓ → glob_search")));
 	assert.ok(updates.every((text) => !text.includes("private reasoning")));
 	assert.deepEqual(result.details.activities, [
 		"routed c3 / glm-5.2",
 		"tool read_file",
+		"tool read_file completed",
 		"tool glob_search",
 	]);
 	assert.deepEqual(result.details.routing, {
@@ -625,6 +630,58 @@ test("event stream reports route, phase, tools, and result activities", async ()
 		routed_model: "deepseek-v4-pro",
 		routing_source: "v4_phase3",
 	});
+});
+
+test("tool result IDs mark the matching duplicate tool call complete", async () => {
+	const updates: string[] = [];
+	const events = [
+		JSON.stringify({
+			_event: true,
+			kind: "tool_use_start",
+			tool_use_id: "read-a",
+			tool_name: "read_file",
+		}),
+		JSON.stringify({
+			_event: true,
+			kind: "tool_use_start",
+			tool_use_id: "read-b",
+			tool_name: "read_file",
+		}),
+		JSON.stringify({
+			_event: true,
+			kind: "tool_result",
+			tool_use_id: "read-a",
+			tool_name: "read_file",
+		}),
+		JSON.stringify({
+			_event: true,
+			kind: "tool_result",
+			tool_use_id: "read-b",
+			tool_name: "read_file",
+		}),
+	];
+	const { subagent } = createHarness(async () => ({
+		code: 0,
+		stdout: payload(),
+		stderrLines: events,
+	}));
+
+	const result = await subagent.execute(
+		"call-progress-ids",
+		{ task: "Inspect duplicate tool progress" },
+		undefined,
+		(partial: any) => updates.push(partial.content[0]?.text ?? ""),
+		context(),
+	);
+
+	assert.ok(updates.some((text) => text.includes("Tools: read_file ✓ → read_file")));
+	assert.ok(updates.some((text) => text.includes("Tools: read_file ✓ → read_file ✓")));
+	assert.deepEqual(result.details.activities, [
+		"tool read_file",
+		"tool read_file",
+		"tool read_file completed",
+		"tool read_file completed",
+	]);
 });
 
 test("non-event stderr is ignored by progress and retained for failures", async () => {
@@ -678,6 +735,28 @@ test("timeout returns event-stream activities", async () => {
 	assert.match(result.content[0].text, /routed c2 \/ kimi-code, tool read_file/);
 });
 
+test("failed payloads include an actionable isolated-profile config hint", async () => {
+	const { subagent } = createHarness(async () => ({
+		code: 0,
+		killed: false,
+		stdout: payload({
+			status: "error",
+			errors: [{ message: "No provider available" }],
+		}),
+		stderr: "",
+	}));
+
+	await assert.rejects(
+		subagent.execute("call-no-provider", { task: "Inspect" }, undefined, undefined, context()),
+		(error: Error) => {
+			assert.match(error.message, /No provider available/);
+			assert.match(error.message, /~\/.opensquilla\/config\.toml/);
+			assert.match(error.message, /~\/.opensquilla\/\.env/);
+			return true;
+		},
+	);
+});
+
 test("profile lock conflicts return a concise actionable error", async () => {
 	const { subagent } = createHarness(async () => ({
 		code: 1,
@@ -708,10 +787,55 @@ test("malformed OpenSquilla output cleans scratch state", async () => {
 	assert.deepEqual(await readdir(testTmpDir), []);
 });
 
-test("spawn receives an isolated OPENSQUILLA_STATE_DIR env var", async () => {
+test("stale profile cleanup removes only dead-PID owned directories", async () => {
+	const staleDir = await mkdtemp(join(testTmpDir, "opensquilla-profile-stale-"));
+	const liveDir = await mkdtemp(join(testTmpDir, "opensquilla-profile-live-"));
+	const unownedDir = await mkdtemp(join(testTmpDir, "opensquilla-profile-unowned-"));
+	await writeFile(
+		join(staleDir, ".opensquilla-profile-owner.json"),
+		JSON.stringify({ pid: Number.MAX_SAFE_INTEGER }),
+		{ mode: 0o600 },
+	);
+	await writeFile(
+		join(liveDir, ".opensquilla-profile-owner.json"),
+		JSON.stringify({ pid: process.pid }),
+		{ mode: 0o600 },
+	);
+
+	cleanupStaleProfilesSync(testTmpDir);
+
+	await assert.rejects(stat(staleDir), /ENOENT/);
+	assert.equal((await stat(liveDir)).isDirectory(), true);
+	assert.equal((await stat(unownedDir)).isDirectory(), true);
+});
+
+test("current-process profile cleanup removes owned and tracked profile directories", async () => {
+	const ownedDir = await mkdtemp(join(testTmpDir, "opensquilla-profile-owned-"));
+	await writeFile(
+		join(ownedDir, ".opensquilla-profile-owner.json"),
+		JSON.stringify({ pid: process.pid }),
+		{ mode: 0o600 },
+	);
+
+	cleanupCurrentProcessProfilesSync(testTmpDir);
+
+	await assert.rejects(stat(ownedDir), /ENOENT/);
+});
+
+test("spawn receives a private isolated OPENSQUILLA_STATE_DIR", async () => {
 	let captured: Record<string, string | undefined> | undefined;
+	let directoryMode: number | undefined;
+	let ownerMode: number | undefined;
+	let ownerPid: number | undefined;
 	const { subagent } = createHarness(async (_command, _args, options) => {
 		captured = options.env;
+		const stateDir = options.env?.OPENSQUILLA_STATE_DIR;
+		assert.ok(stateDir);
+		directoryMode = (await stat(stateDir)).mode & 0o777;
+		ownerMode = (await stat(join(stateDir, ".opensquilla-profile-owner.json"))).mode & 0o777;
+		ownerPid = JSON.parse(
+			await readFile(join(stateDir, ".opensquilla-profile-owner.json"), "utf8"),
+		).pid;
 		return { code: 0, killed: false, stdout: payload(), stderr: "" };
 	});
 
@@ -725,6 +849,9 @@ test("spawn receives an isolated OPENSQUILLA_STATE_DIR env var", async () => {
 		`expected profile dir name to start with opensquilla-profile-, got ${stateDir}`,
 	);
 	assert.notEqual(stateDir, process.env.OPENSQUILLA_STATE_DIR);
+	assert.equal(directoryMode, 0o700);
+	assert.equal(ownerMode, 0o600);
+	assert.equal(ownerPid, process.pid);
 });
 
 test("isolated profile directory is removed after a successful call", async () => {

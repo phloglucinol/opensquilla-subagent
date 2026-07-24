@@ -13,6 +13,7 @@
  */
 
 import { spawn as realSpawn } from "node:child_process";
+import { readdirSync, readFileSync, rmSync } from "node:fs";
 import { chmod, copyFile, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -40,6 +41,10 @@ const MAX_CHAIN_PREVIOUS_BYTES = 32 * 1024;
 const MIN_CHAIN_PREVIOUS_BYTES = 1024;
 const CHAIN_PREVIOUS_MAX_LINES = 500;
 const PROGRESS_HEARTBEAT_MS = 3000;
+const PROFILE_PREFIX = "opensquilla-profile-";
+const PROFILE_OWNER_FILE = ".opensquilla-profile-owner.json";
+const ISOLATED_PROFILE_HINT =
+	"If using an isolated profile, verify that ~/.opensquilla/config.toml and ~/.opensquilla/.env exist and contain provider configuration.";
 
 const PERMS_DESC =
 	'restricted=agent read-only (default); bypass/full enable broader OpenSquilla capabilities, but writes remain contained to the workspace/scratch directory. OpenSquilla may maintain .opensquilla-cache runtime files in any mode. bypass/full require UI confirmation.';
@@ -107,13 +112,26 @@ export interface SpawnResult {
 
 type StderrLineCb = (line: string) => boolean | void;
 
+interface ToolProgress {
+	id: string | null;
+	name: string;
+	completed: boolean;
+}
+
 interface EventStreamState {
 	route: string | null;
 	phase: string;
-	tools: string[];
+	tools: ToolProgress[];
 	lastEventAt: number;
 	activities: string[];
 }
+
+interface ProfileCleanupRegistry {
+	paths: Set<string>;
+	exitHookInstalled: boolean;
+}
+
+const PROFILE_REGISTRY_KEY = Symbol.for("opensquilla-subagent.profile-cleanup-registry");
 
 /** Spawn OpenSquilla and stream stderr one line at a time. */
 export async function spawnOpenSquilla(
@@ -346,6 +364,75 @@ function composeChainTask(
 	return task;
 }
 
+function profileCleanupRegistry(): ProfileCleanupRegistry {
+	const globalRegistry = globalThis as typeof globalThis &
+		Record<symbol, ProfileCleanupRegistry | undefined>;
+	if (!globalRegistry[PROFILE_REGISTRY_KEY]) {
+		globalRegistry[PROFILE_REGISTRY_KEY] = { paths: new Set(), exitHookInstalled: false };
+	}
+	return globalRegistry[PROFILE_REGISTRY_KEY];
+}
+
+function readProfileOwner(path: string): { pid: number } | undefined {
+	try {
+		const owner = JSON.parse(readFileSync(join(path, PROFILE_OWNER_FILE), "utf8")) as {
+			pid?: unknown;
+		};
+		return Number.isInteger(owner.pid) && Number(owner.pid) > 0
+			? { pid: Number(owner.pid) }
+			: undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function processIsAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (err) {
+		return (err as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+function scanProfileDirectories(baseDir: string): string[] {
+	try {
+		return readdirSync(baseDir, { withFileTypes: true })
+			.filter((entry) => entry.isDirectory() && entry.name.startsWith(PROFILE_PREFIX))
+			.map((entry) => join(baseDir, entry.name));
+	} catch {
+		return [];
+	}
+}
+
+export function cleanupStaleProfilesSync(baseDir = tmpdir()): void {
+	for (const path of scanProfileDirectories(baseDir)) {
+		const owner = readProfileOwner(path);
+		if (!owner || processIsAlive(owner.pid)) continue;
+		rmSync(path, { recursive: true, force: true });
+	}
+}
+
+export function cleanupCurrentProcessProfilesSync(baseDir = tmpdir()): void {
+	const registry = profileCleanupRegistry();
+	for (const path of registry.paths) rmSync(path, { recursive: true, force: true });
+	registry.paths.clear();
+	for (const path of scanProfileDirectories(baseDir)) {
+		if (readProfileOwner(path)?.pid === process.pid) {
+			rmSync(path, { recursive: true, force: true });
+		}
+	}
+}
+
+function ensureProfileCleanup(): void {
+	const registry = profileCleanupRegistry();
+	if (!registry.exitHookInstalled) {
+		process.once("exit", () => cleanupCurrentProcessProfilesSync());
+		registry.exitHookInstalled = true;
+	}
+	cleanupStaleProfilesSync();
+}
+
 function createEventStreamState(): EventStreamState {
 	return {
 		route: null,
@@ -386,15 +473,35 @@ function processEventLine(line: string, state: EventStreamState): boolean {
 			break;
 		case "tool_use_start":
 			if (typeof parsed.tool_name === "string") {
-				state.tools.push(parsed.tool_name);
+				state.tools.push({
+					id: typeof parsed.tool_use_id === "string" ? parsed.tool_use_id : null,
+					name: parsed.tool_name,
+					completed: false,
+				});
 				if (state.tools.length > 20) state.tools.shift();
 				addEventActivity(state, `tool ${parsed.tool_name}`);
 				state.phase = "tool_calling";
 			}
 			break;
-		case "tool_result":
+		case "tool_result": {
+			const id = typeof parsed.tool_use_id === "string" ? parsed.tool_use_id : null;
+			const name = typeof parsed.tool_name === "string" ? parsed.tool_name : null;
+			let matched: ToolProgress | undefined;
+			for (let i = state.tools.length - 1; i >= 0; i--) {
+				const tool = state.tools[i];
+				if (tool.completed) continue;
+				if ((id && tool.id === id) || (!id && name && tool.name === name)) {
+					matched = tool;
+					break;
+				}
+			}
+			if (matched) {
+				matched.completed = true;
+				addEventActivity(state, `tool ${matched.name} completed`);
+			}
 			state.phase = "tool_calling";
 			break;
+		}
 		case "text_delta":
 			state.phase = "streaming";
 			break;
@@ -421,7 +528,9 @@ function formatProgressMessage(
 	} else if (state.phase !== "starting") {
 		lines.push(`Phase: ${state.phase}`);
 	}
-	const recentTools = state.tools.slice(-4);
+	const recentTools = state.tools
+		.slice(-4)
+		.map((tool) => `${tool.name}${tool.completed ? " ✓" : ""}`);
 	if (recentTools.length > 0) lines.push(`Tools: ${recentTools.join(" → ")}`);
 	return lines.join("\n");
 }
@@ -492,10 +601,16 @@ async function runTurn(
 	assertTaskSize(input.task);
 
 	const scratch = await mkdtemp(join(tmpdir(), "opensquilla-subagent-"));
-	const isolatedProfile = await mkdtemp(join(tmpdir(), "opensquilla-profile-"));
-	await copyProfileConfig(resolveRealOpensquillaHome(), isolatedProfile);
+	const isolatedProfile = await mkdtemp(join(tmpdir(), `${PROFILE_PREFIX}${process.pid}-`));
+	profileCleanupRegistry().paths.add(isolatedProfile);
 	let keepScratch = false;
 	try {
+		await writeFile(
+			join(isolatedProfile, PROFILE_OWNER_FILE),
+			JSON.stringify({ pid: process.pid }),
+			{ encoding: "utf8", mode: 0o600 },
+		);
+		await copyProfileConfig(resolveRealOpensquillaHome(), isolatedProfile);
 		const args = [
 			"agent",
 			"--json",
@@ -541,10 +656,10 @@ async function runTurn(
 				signal: input.signal,
 				timeout: (input.timeout + 15) * 1000,
 				onStderrLine: (line) => {
-					const previous = `${state.route}\0${state.phase}\0${state.tools.join("\0")}`;
+					const previous = JSON.stringify([state.route, state.phase, state.tools]);
 					const handled = processEventLine(line, state);
 					if (handled) {
-						const current = `${state.route}\0${state.phase}\0${state.tools.join("\0")}`;
+						const current = JSON.stringify([state.route, state.phase, state.tools]);
 						if (current !== previous) emitProgress();
 					}
 					return handled;
@@ -565,7 +680,11 @@ async function runTurn(
 		if (isTimeout) {
 			const elapsedSeconds = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
 			const recentActivities =
-				activities.length > 0 ? activities.slice(-8) : state.tools.slice(-8).map((tool) => `tool ${tool}`);
+				activities.length > 0
+					? activities.slice(-8)
+					: state.tools
+							.slice(-8)
+							.map((tool) => `tool ${tool.name}${tool.completed ? " completed" : ""}`);
 			const activitySummary =
 				recentActivities.length > 0
 					? recentActivities.join(", ")
@@ -600,7 +719,7 @@ async function runTurn(
 				payload.errors
 					?.map((e) => e.message || e.code || "unknown")
 					.join("; ") || "agent failed";
-			throw new Error(`OpenSquilla agent failed: ${errs}`);
+			throw new Error(`OpenSquilla agent failed: ${errs}. ${ISOLATED_PROFILE_HINT}`);
 		}
 
 		const outputPath = join(scratch, "result.txt");
@@ -609,6 +728,7 @@ async function runTurn(
 		return { timedOut: false, payload, outputPath, activities };
 	} finally {
 		await rm(isolatedProfile, { recursive: true, force: true }).catch(() => {});
+		profileCleanupRegistry().paths.delete(isolatedProfile);
 		if (!keepScratch) {
 			await rm(scratch, { recursive: true, force: true }).catch(() => {});
 		}
@@ -654,6 +774,8 @@ async function confirmWrite(
 }
 
 export default function (pi: ExtensionAPI) {
+	ensureProfileCleanup();
+
 	// ── opensquilla_subagent: single delegation ──────────────────────────
 	pi.registerTool({
 		name: "opensquilla_subagent",
@@ -1003,9 +1125,11 @@ export default function (pi: ExtensionAPI) {
 						status: "timed_out",
 						timedOut: true,
 						elapsedSeconds: turn.elapsedSeconds,
+						routing: null,
 						effort: options.effort,
 						thinking: options.thinking,
 						activities: turn.activities,
+						outputPath: turn.scratchPath,
 						scratchPath: turn.scratchPath,
 					};
 					const completed =
