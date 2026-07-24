@@ -1,6 +1,6 @@
 {
 	"name": "opensquilla-subagent",
-	"version": "0.2.1",
+	"version": "0.3.0",
 	"description": "Pi extension that delegates tasks to an isolated OpenSquilla agent with its own SquillaRouter model routing",
 	"author": "liurd",
 	"license": "MIT",
