@@ -684,3 +684,86 @@ test("malformed OpenSquilla output cleans scratch state", async () => {
 	);
 	assert.deepEqual(await readdir(testTmpDir), []);
 });
+
+test("spawn failure (missing binary) is wrapped as 'failed to run opensquilla' with the underlying message", async () => {
+	// Exercises the real proc.on('error') -> reject path (post-R1), not an artificial mock throw.
+	const { subagent } = createHarness(async (_cmd, _args, options) => {
+		return await spawnOpenSquilla("definitely-not-a-real-binary-xyz-123", [], {
+			cwd: options.cwd,
+			onStderrLine: options.onStderrLine,
+		});
+	});
+	await assert.rejects(
+		subagent.execute("call-spawn-err", { task: "Inspect" }, undefined, undefined, context()),
+		(error: Error) => {
+			assert.match(error.message, /failed to run opensquilla:/);
+			assert.match(error.message, /ENOENT|not found/i);
+			return true;
+		},
+	);
+	assert.deepEqual(await readdir(testTmpDir), []);
+});
+
+test("empty and whitespace-only tasks are rejected before spawning a process", async () => {
+	let calls = 0;
+	const { subagent } = createHarness(async () => {
+		calls++;
+		return { code: 0, killed: false, stdout: payload(), stderr: "" };
+	});
+	for (const task of ["", "   ", "\n\t  "]) {
+		await assert.rejects(
+			subagent.execute("call-empty", { task }, undefined, undefined, context()),
+			/task must not be empty/,
+		);
+	}
+	assert.equal(calls, 0, "spawn must never be called for empty/whitespace tasks");
+	assert.deepEqual(await readdir(testTmpDir), []);
+});
+
+test("chain applies per-step effort and permissions overrides", async () => {
+	const stepArgs: string[][] = [];
+	const { chain } = createHarness(async (_command, args) => {
+		stepArgs.push([...args]);
+		return { code: 0, killed: false, stdout: payload(), stderr: "" };
+	});
+	await chain.execute(
+		"chain-override",
+		{
+			steps: [
+				{ task: "Scout", effort: "fast" },
+				{ task: "Deep work", effort: "deep", permissions: "full" },
+			],
+		},
+		undefined,
+		undefined,
+		context({ hasUI: true, confirm: true }),
+	);
+	assert.equal(stepArgs.length, 2);
+	assert.equal(argValue(stepArgs[0], "--timeout"), "120");
+	assert.equal(argValue(stepArgs[0], "--thinking"), "off");
+	assert.equal(argValue(stepArgs[1], "--timeout"), "600");
+	assert.equal(argValue(stepArgs[1], "--max-iterations"), "12");
+	assert.equal(stepArgs[0].includes("--workspace-lockdown"), false);
+	assert.equal(stepArgs[1].includes("--workspace-lockdown"), true);
+});
+
+test("large multi-line output is truncated with a notice pointing to the full file", async () => {
+	const big = "line\n".repeat(3000);
+	const { subagent } = createHarness(async () => ({
+		code: 0,
+		killed: false,
+		stdout: payload({ text: big }),
+		stderr: "",
+	}));
+	const result = await subagent.execute(
+		"call-trunc",
+		{ task: "Inspect" },
+		undefined,
+		undefined,
+		context(),
+	);
+	const text = result.content[0].text;
+	assert.ok(text.length < big.length, "truncated text must be shorter than the original");
+	assert.match(text, /Output truncated:/);
+	assert.ok(text.includes(result.details.outputPath), "must point to the full output file");
+});

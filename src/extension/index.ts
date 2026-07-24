@@ -126,7 +126,7 @@ export async function spawnOpenSquilla(
 		onStderrLine?: StderrLineCb;
 	},
 ): Promise<SpawnResult> {
-	return new Promise((resolve) => {
+	return new Promise((resolve, reject) => {
 		const proc = realSpawn(command, args, {
 			cwd: options.cwd,
 			shell: false,
@@ -157,6 +157,14 @@ export async function spawnOpenSquilla(
 			options.signal?.removeEventListener("abort", killProcess);
 			resolve({ stdout, stderr, code, killed });
 		};
+		const fail = (err: Error) => {
+			if (settled) return;
+			settled = true;
+			if (timeoutId) clearTimeout(timeoutId);
+			if (forceKillId) clearTimeout(forceKillId);
+			options.signal?.removeEventListener("abort", killProcess);
+			reject(err);
+		};
 
 		if (options.signal) {
 			if (options.signal.aborted) killProcess();
@@ -183,7 +191,7 @@ export async function spawnOpenSquilla(
 		});
 
 		proc.on("close", (code) => finish(code ?? 0));
-		proc.on("error", () => finish(1));
+		proc.on("error", (err) => fail(err));
 	});
 }
 
