@@ -145,9 +145,10 @@ Apply this decision order:
    review. Pi then reads those files and decides whether specialists are needed.
 4. **Use separate calls for independent checks.** When scope is known, select
    relevant lenses and issue two or three focused `opensquilla_subagent` calls.
-   They may be sibling tool calls; Pi executes them sequentially to avoid
-   profile-lock collisions. Another process using the same profile can still
-   conflict.
+   They may be sibling tool calls; each call uses an isolated OpenSquilla
+   profile, so sibling calls execute concurrently. Chain steps remain
+   sequential because each step consumes the prior step's output through
+   `{previous}` — that is chain semantics, not a profile-lock limitation.
 5. **Use a chain only for genuine dependency.** A later step must consume an
    earlier result; independent reviewers do not belong in a chain.
 6. **Synthesize in the parent.** Pi deduplicates and prioritizes results by
