@@ -118,7 +118,7 @@ Returns the final step's text plus `details.steps[]` with each step's routing, e
 
 Delegation is adaptive and parent-orchestrated. Broad prompts tend to route to c3 and can spend the full timeout, but a fixed review pipeline also wastes work on already-scoped tasks. Apply this decision order:
 
-1. Handle straightforward questions, small edits, and a few local reads directly in Pi. A subagent is optional, not a required stage.
+1. Use Pi's built-in tools by default for one trivial operation. A simple bounded read-only task may still use `opensquilla_subagent` when the user explicitly requests OpenSquilla, sibling tasks can run in parallel, or delegation avoids filling the parent context with intermediate file or command output. Use `effort="fast"`, `permissions="restricted"`, and a strict output limit for these calls. Keep small edits and work that depends on shared Pi session state in the parent.
 2. When scope is clear, give one `opensquilla_subagent` call one bounded objective. Name the module, workflow, file set, or risk class; cap the output and require an evidence format such as `file:line`.
 3. When relevant entry points, call paths, or key files are unknown, use one `fast` explorer. It should return a concise map and essential files, not perform a complete bug review. Pi then reads those files and decides what to delegate next.
 4. When scope is known but several independent concerns matter, select relevant lenses and issue two or three separate focused `opensquilla_subagent` calls. For example, rollback behavior and test coverage may be independent checks; do not hard-code every possible reviewer into every task.

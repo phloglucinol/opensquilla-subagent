@@ -65,11 +65,14 @@ final synthesis itself.
 
 The Pi parent should apply this decision order.
 
-### 1. Handle simple work directly
+### 1. Default trivial operations to Pi, but allow useful offloading
 
-If the task is a straightforward question, a small edit, or can be completed
-with a few local reads, the parent should not delegate merely because a
-subagent exists.
+Pi's built-in tools remain the default for one trivial operation. A simple
+bounded read-only task may still use `opensquilla_subagent` when the user
+explicitly requests OpenSquilla, sibling work can run in parallel, or delegation
+keeps intermediate output out of the parent context. These calls should use
+`effort="fast"`, `permissions="restricted"`, and a strict output limit. Keep
+small edits and work requiring shared Pi session state in the parent.
 
 ### 2. Use one subagent for one bounded objective
 
@@ -191,7 +194,9 @@ test would fail to protect.
 Revise the two tools' descriptions and `promptGuidelines` so they encode the
 adaptive policy concisely:
 
-- simple work may not need delegation;
+- Pi's built-in tools remain the default for one trivial operation, while
+  simple bounded read-only work may be delegated for explicit user requests,
+  parallel execution, or parent-context preservation;
 - one subagent equals one bounded objective;
 - scout only when scope is unknown;
 - independent lenses use separate subagent calls;
@@ -206,7 +211,8 @@ Do not change schemas or execute behavior.
 Replace the current broad "split into 2-4 calls" advice with the decision order
 from this plan. Add short examples for:
 
-- direct/no delegation;
+- direct-by-default trivial operations and conditionally delegated bounded
+  read-only work;
 - one bounded subagent;
 - optional fast scout;
 - independent specialist calls;
@@ -246,7 +252,9 @@ Do not create brittle snapshots of complete descriptions.
 1. No new tool, parameter, schema field, or runtime branch is introduced.
 2. Existing tool names and result text remain unchanged.
 3. Guidance does not prescribe a mandatory three-stage review.
-4. Guidance explicitly allows no delegation for simple work.
+4. Guidance defaults one trivial operation to Pi while allowing bounded
+   read-only delegation for explicit user requests, parallel execution, or
+   parent-context preservation.
 5. Guidance distinguishes unknown-scope scouting from known-scope review.
 6. Independent review lenses are separate calls; chains are dependency-only.
 7. The Pi parent is responsible for final synthesis by default.

@@ -4,12 +4,13 @@ description: |
   Delegate a self-contained task to an isolated OpenSquilla agent that runs
   `opensquilla agent` as a subprocess. The subagent has its own context window,
   its own tool surface, and per-turn SquillaRouter model routing (c0 flash /
-  c1 pro / c2 kimi-code / c3 glm-5.2). Use for isolated investigations, code
-  reviews, or synthesis that benefits from an independent context and
-  automatic model selection. NOT for simple edits, reading files, or work
-  needing shared Pi session state. Delegate adaptively: one bounded objective
-  per call, chains only for genuine dependencies, and parent synthesis by
-  default.
+  c1 pro / c2 kimi-code / c3 glm-5.2). Use for bounded investigations, reviews,
+  synthesis, and simple read-only tool tasks that benefit from explicit user
+  delegation, parallel execution, or an independent context window. Pi's
+  built-in tools remain the default for one trivial operation. Do not delegate
+  small edits or work needing shared Pi session state. Delegate adaptively: one
+  bounded objective per call, chains only for genuine dependencies, and parent
+  synthesis by default.
 ---
 
 # OpenSquilla Subagent
@@ -28,13 +29,17 @@ text, usage, and routing metadata.
   SquillaRouter based on task difficulty (c0–c3), not by the parent.
 - **Specialist analysis**: hand off one bounded report, comparison, or risk
   analysis that benefits from a different model tier and a clean context.
-- **Cost-aware delegation**: trivial subtasks route to cheap models
-  (deepseek-v4-flash), complex ones route to stronger models automatically.
+- **Bounded read-only work**: delegate extraction, lookup, listing, or narrow
+  commands when the user explicitly requests OpenSquilla, sibling tasks can run
+  in parallel, or delegation keeps intermediate output out of the parent context.
+- **Cost-aware delegation**: trivial subtasks can route to cheap models
+  (deepseek-v4-flash), while complex ones route to stronger models automatically.
 
 ## When NOT to Use
 
-- Simple edits — use the built-in `edit` tool.
-- Reading files — use `read`.
+- One trivial operation with no delegation benefit — use Pi's built-in tool by
+  default.
+- Small edits — use the built-in `edit` tool.
 - Work that needs shared session state or continuation of the parent
   conversation — OpenSquilla runs stateless by default.
 - Anything requiring Pi's OAuth subscription — OpenSquilla needs its own API
@@ -136,8 +141,12 @@ opensquilla_chain({
 
 Apply this decision order:
 
-1. **Do not delegate simple work.** Answer straightforward questions, make
-   small edits, and perform a few local reads directly in Pi.
+1. **Default trivial operations to Pi, but allow useful offloading.** Use Pi's
+   built-in tools for one trivial operation unless the user explicitly requests
+   OpenSquilla, parallel sibling tasks are useful, or delegation preserves the
+   parent context. In those cases, simple bounded read-only tasks are valid
+   subagent work; use `fast`, `restricted`, and a strict output limit. Keep
+   small edits and shared-session work in Pi.
 2. **Use one focused subagent when scope is clear.** Give it one bounded
    objective, explicit scope, an output limit, and an evidence format.
 3. **Scout only when scope is unknown.** One `fast` explorer may identify entry
@@ -160,8 +169,10 @@ Keep reviewer tasks concrete: name the scope, cap the findings, require
 
 ## Examples
 
-No delegation: read two named files and make a small local edit with Pi's
-built-in tools.
+No delegation by default: perform one trivial local operation directly in Pi.
+A simple read-only task may still be delegated with `fast` effort when the user
+asks for OpenSquilla, several independent lookups can run concurrently, or the
+raw intermediate output would unnecessarily consume the parent context.
 
 One focused subagent:
 

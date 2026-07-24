@@ -203,6 +203,24 @@ test("tool guidance encodes adaptive parent-orchestrated delegation", () => {
 	const subagentGuidance = subagent.promptGuidelines ?? [];
 	const chainGuidance = chain.promptGuidelines ?? [];
 
+	assert.ok(
+		subagentGuidance.some(
+			(line) =>
+				/built-in tools by default for one trivial operation/i.test(line) &&
+				/simple bounded read-only tasks may use opensquilla_subagent/i.test(line) &&
+				/explicitly requests OpenSquilla/i.test(line) &&
+				/parallel sibling execution is useful/i.test(line) &&
+				/preserves the parent context/i.test(line),
+		),
+	);
+	assert.ok(
+		subagentGuidance.some(
+			(line) =>
+				/effort=fast/i.test(line) &&
+				/permissions=restricted/i.test(line) &&
+				/Keep small edits and shared-session work in Pi/i.test(line),
+		),
+	);
 	assert.ok(subagentGuidance.some((line) => /one bounded objective/i.test(line)));
 	assert.ok(subagentGuidance.some((line) => /fast scout only when .*scope.*unknown/i.test(line)));
 	assert.ok(subagentGuidance.some((line) => /separate opensquilla_subagent calls for independent checks/i.test(line)));
@@ -217,7 +235,8 @@ test("tool guidance encodes adaptive parent-orchestrated delegation", () => {
 			/each call uses an isolated profile so sibling calls execute concurrently/i.test(line),
 		),
 	);
-	assert.match(subagent.description, /Simple work stays with Pi/i);
+	assert.match(subagent.description, /built-in tools remain the default for one trivial operation/i);
+	assert.match(subagent.description, /simple bounded read-only tasks may be delegated/i);
 	assert.equal(subagent.executionMode, undefined);
 	assert.equal(chain.executionMode, undefined);
 });

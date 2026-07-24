@@ -37,8 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `maxIterations=8`.
 - Moved `typebox` from a bundled runtime dependency to a Pi peer dependency.
 - Delegation guidance now follows an adaptive, parent-orchestrated policy:
-  simple work stays in Pi, scouting is conditional, independent checks use
-  separate bounded calls, chains require data dependency, and Pi synthesizes
+  Pi's built-in tools remain the default for one trivial operation, while
+  simple bounded read-only tasks may be delegated when explicitly requested,
+  useful to run in parallel, or helpful for preserving the parent context;
+  scouting is conditional, chains require data dependency, and Pi synthesizes
   results by default.
 - Each OpenSquilla turn runs in an isolated profile (a fresh
   `OPENSQUILLA_STATE_DIR` temp directory created per call and removed
