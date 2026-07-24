@@ -20,17 +20,23 @@ interface RegisteredTool {
 }
 
 const originalTmpDir = process.env.TMPDIR;
+const originalStateDir = process.env.OPENSQUILLA_STATE_DIR;
 let testTmpDir = "";
 
 beforeEach(async () => {
 	testTmpDir = await mkdtemp(join(tmpdir(), "opensquilla-extension-test-"));
 	process.env.TMPDIR = testTmpDir;
+	// Point the profile resolver at the empty test dir so copyProfileConfig is a
+	// no-op and tests never read the developer's real ~/.opensquilla secrets.
+	process.env.OPENSQUILLA_STATE_DIR = testTmpDir;
 });
 
 afterEach(async () => {
 	_setSpawnFn(spawnOpenSquilla);
 	if (originalTmpDir === undefined) delete process.env.TMPDIR;
 	else process.env.TMPDIR = originalTmpDir;
+	if (originalStateDir === undefined) delete process.env.OPENSQUILLA_STATE_DIR;
+	else process.env.OPENSQUILLA_STATE_DIR = originalStateDir;
 	await rm(testTmpDir, { recursive: true, force: true });
 });
 
@@ -68,6 +74,7 @@ interface FakeSpawnResult {
 
 interface SpawnOptions {
 	cwd: string;
+	env?: Record<string, string | undefined>;
 	signal?: AbortSignal;
 	timeout?: number;
 	onStderrLine?: (line: string) => boolean | void;
@@ -183,8 +190,8 @@ test("schemas make documented defaults optional and reject extra properties", ()
 	assert.equal(chainSchema.properties.steps.maxItems, 10);
 	assert.equal(chainSchema.properties.steps.items.additionalProperties, false);
 	assert.deepEqual(singleSchema.properties.effort.enum, ["fast", "balanced", "deep"]);
-	assert.equal(subagent.executionMode, "sequential");
-	assert.equal(chain.executionMode, "sequential");
+	assert.equal(subagent.executionMode, undefined);
+	assert.equal(chain.executionMode, undefined);
 	assert.equal(chainSchema.properties.previousMaxBytes.minimum, 1024);
 	assert.equal(chainSchema.properties.previousMaxBytes.maximum, 32 * 1024);
 });
@@ -206,16 +213,13 @@ test("tool guidance encodes adaptive parent-orchestrated delegation", () => {
 		),
 	);
 	assert.ok(
-		subagentGuidance.some(
-			(line) =>
-				/sibling calls in one Pi response execute sequentially to avoid profile-lock collisions/i.test(
-					line,
-				) && /another process using the same profile can still conflict/i.test(line),
+		[...subagentGuidance, ...chainGuidance].some((line) =>
+			/each call uses an isolated profile so sibling calls execute concurrently/i.test(line),
 		),
 	);
 	assert.match(subagent.description, /Simple work stays with Pi/i);
-	assert.equal(subagent.executionMode, "sequential");
-	assert.equal(chain.executionMode, "sequential");
+	assert.equal(subagent.executionMode, undefined);
+	assert.equal(chain.executionMode, undefined);
 });
 
 test("single delegation applies defaults, persists output, and reports Pi usage", async () => {
@@ -683,6 +687,85 @@ test("malformed OpenSquilla output cleans scratch state", async () => {
 		/returned non-JSON/,
 	);
 	assert.deepEqual(await readdir(testTmpDir), []);
+});
+
+test("spawn receives an isolated OPENSQUILLA_STATE_DIR env var", async () => {
+	let captured: Record<string, string | undefined> | undefined;
+	const { subagent } = createHarness(async (_command, _args, options) => {
+		captured = options.env;
+		return { code: 0, killed: false, stdout: payload(), stderr: "" };
+	});
+
+	await subagent.execute("call-env", { task: "Inspect env" }, undefined, undefined, context());
+
+	assert.ok(captured, "spawn options.env was captured");
+	const stateDir = captured!.OPENSQUILLA_STATE_DIR;
+	assert.equal(typeof stateDir, "string", "OPENSQUILLA_STATE_DIR must be a string");
+	assert.ok(
+		(stateDir as string).split("/").at(-1)!.startsWith("opensquilla-profile-"),
+		`expected profile dir name to start with opensquilla-profile-, got ${stateDir}`,
+	);
+	assert.notEqual(stateDir, process.env.OPENSQUILLA_STATE_DIR);
+});
+
+test("isolated profile directory is removed after a successful call", async () => {
+	let stateDir: string | undefined;
+	const { subagent } = createHarness(async (_command, _args, options) => {
+		stateDir = options.env?.OPENSQUILLA_STATE_DIR;
+		return { code: 0, killed: false, stdout: payload(), stderr: "" };
+	});
+
+	await subagent.execute(
+		"call-profile-cleanup",
+		{ task: "Inspect cleanup" },
+		undefined,
+		undefined,
+		context(),
+	);
+
+	assert.ok(stateDir, "profile dir was captured");
+	await assert.rejects(stat(stateDir!), /ENOENT/);
+});
+
+test("isolated profile directory is removed after a timeout", async () => {
+	let stateDir: string | undefined;
+	const { subagent } = createHarness(async (_command, _args, options) => {
+		stateDir = options.env?.OPENSQUILLA_STATE_DIR;
+		return { code: 1, killed: true, stdout: "", stderr: "Agent turn timed out after 300.0s" };
+	});
+
+	const result = await subagent.execute(
+		"call-profile-timeout",
+		{ task: "Inspect timeout profile" },
+		undefined,
+		undefined,
+		context(),
+	);
+
+	assert.equal(result.details.timedOut, true);
+	assert.ok(stateDir, "profile dir was captured");
+	await assert.rejects(stat(stateDir!), /ENOENT/);
+});
+
+test("concurrent sibling calls use distinct isolated profiles and clean up", async () => {
+	const stateDirs: string[] = [];
+	const { subagent } = createHarness(async (_command, _args, options) => {
+		const dir = options.env?.OPENSQUILLA_STATE_DIR;
+		if (dir) stateDirs.push(dir);
+		return { code: 0, killed: false, stdout: payload(), stderr: "" };
+	});
+
+	const results = await Promise.all([
+		subagent.execute("call-concurrent-a", { task: "Task A" }, undefined, undefined, context()),
+		subagent.execute("call-concurrent-b", { task: "Task B" }, undefined, undefined, context()),
+	]);
+
+	assert.equal(results.length, 2);
+	assert.equal(stateDirs.length, 2);
+	assert.notEqual(stateDirs[0], stateDirs[1]);
+	for (const dir of stateDirs) {
+		await assert.rejects(stat(dir), /ENOENT/);
+	}
 });
 
 test("spawn failure (missing binary) is wrapped as 'failed to run opensquilla' with the underlying message", async () => {

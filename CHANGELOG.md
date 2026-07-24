@@ -40,8 +40,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   simple work stays in Pi, scouting is conditional, independent checks use
   separate bounded calls, chains require data dependency, and Pi synthesizes
   results by default.
-- Both tools declare sequential execution to respect OpenSquilla's profile-wide
-  writer lock; lock conflicts now return a concise actionable error.
+- Each OpenSquilla turn runs in an isolated profile (a fresh
+  `OPENSQUILLA_STATE_DIR` temp directory created per call and removed
+  afterwards, including on timeout), so sibling `opensquilla_subagent`
+  calls in one Pi response execute concurrently. Both tools no longer declare
+  `executionMode: "sequential"`; chain steps remain sequential because each
+  step consumes the prior step's output through `{previous}`, not due to a
+  profile lock. Profile-lock conflict errors still return a concise
+  actionable message.
 
 ### Fixed
 

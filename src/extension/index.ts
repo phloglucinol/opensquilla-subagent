@@ -13,8 +13,8 @@
  */
 
 import { spawn as realSpawn } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, copyFile, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import * as readline from "node:readline";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -121,6 +121,7 @@ export async function spawnOpenSquilla(
 	args: string[],
 	options: {
 		cwd: string;
+		env?: Record<string, string | undefined>;
 		signal?: AbortSignal;
 		timeout?: number;
 		onStderrLine?: StderrLineCb;
@@ -129,6 +130,7 @@ export async function spawnOpenSquilla(
 	return new Promise((resolve, reject) => {
 		const proc = realSpawn(command, args, {
 			cwd: options.cwd,
+			env: options.env,
 			shell: false,
 			stdio: ["ignore", "pipe", "pipe"],
 		});
@@ -424,6 +426,52 @@ function formatProgressMessage(
 	return lines.join("\n");
 }
 
+function expandUserPath(p: string): string {
+	return p.startsWith("~") ? join(homedir(), p.slice(1)) : p;
+}
+
+/**
+ * Resolve the OpenSquilla home the subprocess would use without our per-call
+ * temp override. Mirrors opensquilla.paths.default_opensquilla_home(): an
+ * explicit OPENSQUILLA_STATE_DIR wins; otherwise OPENSQUILLA_HOME/PROFILE
+ * profile mode selects ~/.opensquilla/profiles/<profile>; the default is the
+ * legacy ~/.opensquilla home.
+ */
+function resolveRealOpensquillaHome(): string {
+	const stateDir = process.env.OPENSQUILLA_STATE_DIR?.trim();
+	if (stateDir) return expandUserPath(stateDir);
+	const profilesRootEnv = process.env.OPENSQUILLA_HOME?.trim();
+	const profileEnv = process.env.OPENSQUILLA_PROFILE?.trim();
+	if (profilesRootEnv || profileEnv) {
+		const root = profilesRootEnv
+			? expandUserPath(profilesRootEnv)
+			: join(homedir(), ".opensquilla", "profiles");
+		return join(root, profileEnv || "default");
+	}
+	return join(homedir(), ".opensquilla");
+}
+
+/**
+ * Copy config.toml and .env from the real OpenSquilla home into the isolated
+ * temp profile. OpenSquilla loads both relative to the profile home, and its
+ * recovery layer rejects symlinks ("config must be a regular non-reparse
+ * file", "profile dotenv cannot be inspected without following links"), so
+ * these must be real file copies. Router/model assets live in the Python
+ * package, not the home, so these two files are all an empty profile needs to
+ * route and authenticate. Best-effort: a missing source is skipped, and the
+ * subprocess surfaces "no provider" if config is genuinely absent.
+ */
+async function copyProfileConfig(sourceHome: string, destHome: string): Promise<void> {
+	for (const name of ["config.toml", ".env"] as const) {
+		try {
+			await copyFile(join(sourceHome, name), join(destHome, name));
+			await chmod(join(destHome, name), 0o600);
+		} catch {
+			// Source missing/unreadable or copy unsupported — best effort.
+		}
+	}
+}
+
 /** Run one `opensquilla agent --json` turn. Throws on non-timeout failures. */
 async function runTurn(
 	input: {
@@ -444,6 +492,8 @@ async function runTurn(
 	assertTaskSize(input.task);
 
 	const scratch = await mkdtemp(join(tmpdir(), "opensquilla-subagent-"));
+	const isolatedProfile = await mkdtemp(join(tmpdir(), "opensquilla-profile-"));
+	await copyProfileConfig(resolveRealOpensquillaHome(), isolatedProfile);
 	let keepScratch = false;
 	try {
 		const args = [
@@ -487,6 +537,7 @@ async function runTurn(
 		try {
 			result = await _spawnOpenSquilla(OPENSQUILLA_BIN, args, {
 				cwd: input.cwd,
+				env: { ...process.env, OPENSQUILLA_STATE_DIR: isolatedProfile },
 				signal: input.signal,
 				timeout: (input.timeout + 15) * 1000,
 				onStderrLine: (line) => {
@@ -557,6 +608,7 @@ async function runTurn(
 		keepScratch = true;
 		return { timedOut: false, payload, outputPath, activities };
 	} finally {
+		await rm(isolatedProfile, { recursive: true, force: true }).catch(() => {});
 		if (!keepScratch) {
 			await rm(scratch, { recursive: true, force: true }).catch(() => {});
 		}
@@ -614,9 +666,9 @@ export default function (pi: ExtensionAPI) {
 			"Use effort=fast for scouting, extraction, and narrow checks; reserve deep for",
 			"one tightly scoped high-risk question. Simple work stays with Pi. Scout only",
 			"when scope is unknown; use separate calls for independent checks and a chain",
-			"only for dependent phases. Pi performs final synthesis by default. Sibling calls",
-			"in one Pi response execute sequentially to avoid profile-lock collisions; another",
-			"process using the same profile can still conflict.",
+			"only for dependent phases. Pi performs final synthesis by default. Each call",
+			"uses an isolated OpenSquilla profile, so sibling calls in one Pi response can",
+			"execute concurrently.",
 		].join(" "),
 		promptSnippet:
 			"Delegate an isolated task to OpenSquilla with its own SquillaRouter model routing",
@@ -624,11 +676,10 @@ export default function (pi: ExtensionAPI) {
 			"Handle simple questions, small edits, and a few local reads directly in Pi; delegation is optional.",
 			"Give each opensquilla_subagent call one bounded objective with explicit scope, an output limit, and an evidence format.",
 			"Run one fast scout only when relevant scope, entry points, or key files are unknown; it maps the path without a full bug review, then Pi reads the key files and decides what to delegate next.",
-			"When scope is known, select relevant lenses and use 2-3 separate opensquilla_subagent calls for independent checks; sibling calls in one Pi response execute sequentially to avoid profile-lock collisions, while another process using the same profile can still conflict.",
+			"When scope is known, select relevant lenses and use 2-3 separate opensquilla_subagent calls for independent checks; each call uses an isolated profile so sibling calls execute concurrently.",
 			"Use opensquilla_chain only when a later step depends on earlier output; keep dependent handoffs concise.",
 			"The Pi parent performs final synthesis by default; do not launch a fast synthesis subagent by default.",
 		],
-		executionMode: "sequential",
 		parameters: Type.Object(
 			{
 				task: Type.String({
@@ -790,17 +841,16 @@ export default function (pi: ExtensionAPI) {
 			"and visible activity updates.",
 			"Use {previous} only for concise handoffs; 12KB is inserted by default.",
 			"Use separate opensquilla_subagent calls for independent checks. Pi performs",
-			"final synthesis by default. Sibling calls in one Pi response execute sequentially",
-			"to avoid profile-lock collisions; another process can still conflict.",
+			"final synthesis by default. Each call uses an isolated OpenSquilla profile, so",
+			"sibling calls in one Pi response can execute concurrently.",
 			"Fails fast: a failed step stops the chain and reports completed outputs.",
 		].join(" "),
 		promptSnippet: "Run a multi-step OpenSquilla chain where each step gets its own SquillaRouter tier",
 		promptGuidelines: [
 			"Use opensquilla_chain only when a later step depends on earlier output; keep it to 2-4 bounded steps with concise structured handoffs.",
-			"Use separate opensquilla_subagent calls for independent checks; sibling calls in one Pi response execute sequentially to avoid profile-lock collisions, while another process using the same profile can still conflict.",
+			"Use separate opensquilla_subagent calls for independent checks; each call uses an isolated profile so sibling calls execute concurrently.",
 			"The Pi parent performs final synthesis by default; do not add a synthesis chain step by default.",
 		],
-		executionMode: "sequential",
 		parameters: Type.Object(
 			{
 				steps: Type.Array(ChainStep, {
